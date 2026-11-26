@@ -1,137 +1,80 @@
-# Sessions
+# Sessions and Context
 
-Pi saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
+Pi saves a conversation as a session. The active branch of that session supplies conversation history for the next model request. Use session commands to continue work, explore another branch, or reduce the amount of history sent to the model.
 
-## Session Storage
+## Continue or switch sessions
 
-Sessions auto-save to `~/.pi/agent/sessions/`, organized by working directory. Each session is a JSONL file with a tree structure.
+Pi saves sessions automatically unless you start it with `--no-session`.
 
 ```bash
-pi -c                  # Continue most recent session
-pi -r                  # Browse and select from past sessions
-pi --no-session        # Ephemeral mode; do not save
-pi --session <path|id> # Use a specific session file or partial session ID
-pi --fork <path|id>    # Fork a session file or partial session ID into a new session
+pi --continue
+pi --resume
 ```
 
-Use `/session` in interactive mode to see the current session file, session ID, message count, tokens, and cost.
+`--continue` opens the most recent session for the current directory. `--resume` opens the session picker. In interactive mode, `/resume` opens the same picker and `/new` starts a new session.
 
-For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
+Each session records the working directory it was created in and never changes it. Pi runs a session in its working directory, so tools, `@path` references, project configuration, and context files resolve from there.
 
-## Session Commands
+| Entry point | Working directory |
+|---|---|
+| `--continue` | The current directory |
+| `--resume`, `/resume`, `--session`, `/import` | The session's working directory, which can differ from the current directory |
+| `--fork`, or a `--session` ID from another directory that you choose to fork | The current directory, in a new session |
 
-| Command | Description |
-|---------|-------------|
-| `/resume` | Browse and select previous sessions |
-| `/new` | Start a new session |
-| `/name <name>` | Set the current session display name |
-| `/session` | Show session info |
-| `/tree` | Navigate the current session tree |
-| `/fork` | Create a new session from a previous user message |
-| `/clone` | Duplicate the current active branch into a new session |
-| `/compact [prompt]` | Summarize older context; see [Compaction](compaction.md) |
-| `/export [file]` | Export session to HTML |
-| `/share` | Upload as private GitHub gist with shareable HTML link |
+If a session's working directory no longer exists, for example after the project folder was renamed, interactive mode asks how to open it:
 
-## Resuming and Deleting Sessions
+- **Continue** runs the session in the current directory. Pi does not store that choice, so it asks again the next time you open the session.
+- **Fork** copies the session into the current directory as a new session with a new ID, like `--fork`. The original stays unchanged. At startup the copy is stored like other new sessions for the current directory; from `/resume` or `/import` it is stored next to the current session, like `/new`.
+- **Cancel** leaves the current session open, or exits at startup.
 
-`/resume` opens an interactive session picker for the current project. `pi -r` opens the same picker at startup.
+Other modes exit with an error.
 
-In the picker you can:
+Use `/name` or `--name` to assign a recognizable session name. Run `/session` to verify the current session file, ID, message count, token usage, and cost.
 
-- search by typing
-- toggle path display with Ctrl+P
-- toggle sort mode with Ctrl+S
-- filter to named sessions with Ctrl+N
-- rename with Ctrl+R
-- delete with Ctrl+D, then confirm
+The session picker lets you search, rename, and delete sessions. It can also show paths, change sorting, and limit results to named sessions. See [Keybindings](keybindings.md#sessions) for its shortcuts.
 
-When available, pi uses the `trash` CLI for deletion instead of permanently removing files.
+## Choose how to branch
 
-## Naming Sessions
+Pi stores entries as a tree, so returning to an earlier point does not erase the branch you leave.
 
-Use `/name <name>` to set a human-readable session name:
+| Action | Result | Use it when |
+|---|---|---|
+| `/tree` | Moves within the current session file | Related alternatives should stay together |
+| `/fork` | Creates a new session from an earlier user message | The alternative should become separate work |
+| `/clone` | Copies the active branch into a new session | You want a separate copy of the current state |
 
-```text
-/name Refactor auth module
-```
+In `/tree`, select a user message to put its text back in the editor. Edit and submit it to create another branch. Selecting an assistant response or another entry continues after that entry with an empty editor.
 
-Named sessions are easier to find in `/resume` and `pi -r`.
+When you leave a branch, Pi can summarize it and attach that summary to the branch you enter. This preserves relevant work from the abandoned path without including every message from it.
 
-## Branching with `/tree`
+For the persisted tree and entry types, see [Session Format](session-format.md).
 
-Sessions are stored as trees. Every entry has an `id` and `parentId`, and the current position is the active leaf. `/tree` lets you jump to any previous point and continue from there without creating a new file.
+## Manage conversation context
 
-<p align="center"><img src="images/tree-view.png" alt="Tree View" width="600"></p>
+The model receives the active branch, not every branch in the session file. Pi combines that history with the system prompt, discovered context files, available tools, and loaded skill descriptions. [How Pi Works](how-pi-works.md#context) describes how those inputs are assembled.
 
-Example shape:
+The footer shows current context usage. When the active context approaches the model's limit, Pi normally compacts older history automatically. Compaction adds a summary and keeps recent messages. It does not delete the original session entries.
 
-```text
-├─ user: "Hello, can you help..."
-│  └─ assistant: "Of course! I can..."
-│     ├─ user: "Let's try approach A..."
-│     │  └─ assistant: "For approach A..."
-│     │     └─ user: "That worked..."  ← active
-│     └─ user: "Actually, approach B..."
-│        └─ assistant: "For approach B..."
-```
+Run `/compact` to compact manually. You can add instructions when the summary should preserve a particular topic or decision. Configure automatic compaction and retained history through [Settings](settings.md#compaction).
 
-### Tree Controls
+Compaction can fail if the provider is unavailable or cannot accept the summarization request. Correct the provider problem and run `/compact` again. Disabling automatic compaction does not disable the manual command.
 
-| Key | Action |
-|-----|--------|
-| ↑/↓ | Navigate visible entries |
-| ←/→ | Page up/down |
-| Ctrl+←/Ctrl+→ or Alt+←/Alt+→ | Fold/unfold or jump between branch segments |
-| Shift+L | Set or clear a label on the selected entry |
-| Shift+T | Toggle label timestamps |
-| Enter | Select entry |
-| Escape/Ctrl+C | Cancel |
-| Ctrl+O | Cycle filter mode |
+See [Compaction Reference](compaction.md) for thresholds, retained boundaries, branch-summary behavior, and extension hooks.
 
-Filter modes are: default, no-tools, user-only, labeled-only, and all. Configure the default with `treeFilterMode` in [Settings](settings.md).
+## Control session storage
 
-### Selection Behavior
+By default, Pi stores sessions under `~/.pi/agent/sessions/`, grouped by working directory. Use `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, or the `sessionDir` setting to choose another location. The CLI option has highest precedence.
 
-Selecting a user or custom message:
+Use `--no-session` for an ephemeral run. An ephemeral session cannot be resumed after Pi exits.
 
-1. Moves the leaf to the selected message's parent.
-2. Places the selected message text in the editor.
-3. Lets you edit and resubmit, creating a new branch.
+## Export or share a session
 
-Selecting an assistant, tool, compaction, or other non-user entry:
+Use `/export` to write the current session as HTML or JSONL. Use `/share` to upload it and get a viewer link. By default, Pi uses a Radius artifact when Radius authentication is configured; otherwise, it uses a private GitHub gist. Set [`sessionShareDestination`](settings.md#sessions-and-context) to `gist` or `radius` to force one destination.
 
-1. Moves the leaf to that entry.
-2. Leaves the editor empty.
-3. Lets you continue from that point.
+Review exported or shared sessions first. They can contain prompts, model responses, tool arguments, command output, file contents, and extension messages.
 
-Selecting the root user message resets the leaf to an empty conversation and places the original prompt in the editor.
+## Report a bug
 
-## `/tree`, `/fork`, and `/clone`
+Run `/bug [description]` to prepare a private report for the Pi developers. You can include the session transcript, omit it, or ask the current model to summarize the problem. Review any transcript or generated summary because it can contain sensitive conversation data.
 
-| Feature | `/tree` | `/fork` | `/clone` |
-|---------|---------|---------|----------|
-| Output | Same session file | New session file | New session file |
-| View | Full tree | User-message selector | Current active branch |
-| Typical use | Explore alternatives in place | Start a new session from an earlier prompt | Duplicate current work before continuing |
-| Summary | Optional branch summary | None | None |
-
-Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone` when you want a separate session file.
-
-## Branch Summaries
-
-When `/tree` switches away from one branch to another, pi can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
-
-When prompted, choose one of:
-
-1. no summary
-2. summarize with the default prompt
-3. summarize with custom focus instructions
-
-See [Compaction](compaction.md) for branch summarization internals and extension hooks.
-
-## Session Format
-
-Session files are JSONL and contain message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries.
-
-For parsers, extensions, SDK usage, and the full SessionManager API, see [Session Format](session-format.md).
+The report includes environment and provider configuration without credential values, plus recorded error diagnostics. Upload it through `radius.pi.dev` or export the same report as a zip to inspect and share yourself. Uploads do not require a login; Radius authentication attributes the report to your account so the developers can follow up. If an upload fails, Pi offers to export the zip.

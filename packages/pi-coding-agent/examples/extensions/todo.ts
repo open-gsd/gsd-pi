@@ -10,9 +10,9 @@
  * correct for that point in history.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { StringEnum } from "@gsd/pi-ai";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@gsd/pi-coding-agent";
+import { matchesKey, Text, truncateToWidth } from "@gsd/pi-tui";
 import { Type } from "typebox";
 
 interface Todo {
@@ -276,6 +276,13 @@ export default function (pi: ExtensionAPI) {
 
 				case "clear":
 					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", "Cleared all todos"), 0, 0);
+
+				default:
+					return new Text(
+						result.content[0]?.type === "text" ? theme.fg("error", result.content[0].text) : "",
+						0,
+						0,
+					);
 			}
 		},
 	});
@@ -284,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("todos", {
 		description: "Show all todos on the current branch",
 		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
+			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/todos requires interactive mode", "error");
 				return;
 			}

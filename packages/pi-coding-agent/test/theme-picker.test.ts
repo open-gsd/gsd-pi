@@ -6,7 +6,7 @@ import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
 	setRegisteredThemes,
-} from "../src/modes/interactive/theme/theme.ts";
+} from "../src/modes/interactive/theme/theme.js";
 
 type ThemeFile = {
 	name: string;
@@ -33,7 +33,6 @@ describe("theme picker", () => {
 
 	it("uses custom theme content names instead of file names", () => {
 		const darkTheme = JSON.parse(
-			// allow-source-grep: dark.json is fixture data for custom theme discovery tests.
 			readFileSync(new URL("../src/modes/interactive/theme/dark.json", import.meta.url), "utf-8"),
 		) as ThemeFile;
 		const customTheme: ThemeFile = {

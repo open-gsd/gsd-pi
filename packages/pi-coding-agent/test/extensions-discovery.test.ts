@@ -3,10 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverExtensionEntryPaths } from "../src/core/extension-discovery.ts";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
-import { DefaultPackageManager } from "../src/core/package-manager.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,6 +51,77 @@ describe("extensions discovery", () => {
 		expect(result.extensions.map((e) => path.basename(e.path)).sort()).toEqual(["bar.ts", "foo.ts"]);
 	});
 
+	it("loads the coding-agent entrypoint without rewriting pi-ai provider subpaths", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "coding-agent-import.ts"),
+			`
+				import { getAgentDir } from "@gsd/pi-coding-agent";
+				void getAgentDir;
+				export default function(pi) {
+					pi.registerCommand("test", { handler: async () => {} });
+				}
+			`,
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+	});
+
+	it("does not infer package ownership from ancestor manifests", async () => {
+		// Regression for #9863.
+		const dependencyDir = path.join(tempDir, "node_modules", "@earendil-works", "pi-coding-agent");
+		fs.mkdirSync(dependencyDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, "package.json"),
+			JSON.stringify({
+				name: "application",
+				type: "module",
+				dependencies: { "@gsd/pi-coding-agent": "1.0.0" },
+			}),
+		);
+		fs.writeFileSync(
+			path.join(dependencyDir, "package.json"),
+			JSON.stringify({ name: "@gsd/pi-coding-agent", type: "module", exports: "./index.js" }),
+		);
+		fs.writeFileSync(path.join(dependencyDir, "index.js"), "export const physicalDependency = true;");
+		fs.writeFileSync(
+			path.join(extensionsDir, "compiled-esm-extension.js"),
+			`
+				import { physicalDependency } from "@gsd/pi-coding-agent";
+				export default function(pi) {
+					if (physicalDependency) pi.registerCommand("physical-dependency", { handler: async () => {} });
+				}
+			`,
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toEqual([]);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].commands.has("physical-dependency")).toBe(true);
+		expect(result.warnings).toEqual([]);
+	});
+
+	it("keeps the type-only pi-ai OAuth compatibility barrel resolvable", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "oauth-import.ts"),
+			`
+				import * as oauth from "@gsd/pi-ai/oauth";
+				void oauth;
+				export default function(pi) {
+					pi.registerCommand("test", { handler: async () => {} });
+				}
+			`,
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toEqual([]);
+		expect(result.extensions).toHaveLength(1);
+	});
+
 	it("discovers direct .js files in extensions/", async () => {
 		fs.writeFileSync(path.join(extensionsDir, "foo.js"), extensionCode);
 
@@ -62,59 +130,6 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(path.basename(result.extensions[0].path)).toBe("foo.js");
-	});
-
-	it("skips TypeScript declaration (.d.ts) files instead of erroring", async () => {
-		// A stray declaration file (e.g. emitted into an extensions directory by a
-		// declaration-emitting build) is not a loadable extension: it has no
-		// runtime exports, so attempting to load it produces a spurious
-		// "does not export a valid factory function" error.
-		fs.writeFileSync(path.join(extensionsDir, "real.js"), extensionCode);
-		fs.writeFileSync(path.join(extensionsDir, "real.d.ts"), "export declare function helper(): void;\n");
-		fs.writeFileSync(path.join(extensionsDir, "stray.d.ts"), "export declare function orphan(): void;\n");
-
-		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(path.basename(result.extensions[0].path)).toBe("real.js");
-	});
-
-	it("discoverExtensionEntryPaths skips .d.ts files (shared discovery guard)", () => {
-		// The loader test above only exercises extensions/loader.ts; this pins the
-		// independently implemented guard in core/extension-discovery.ts.
-		fs.writeFileSync(path.join(extensionsDir, "real.ts"), extensionCode);
-		fs.writeFileSync(path.join(extensionsDir, "real.d.ts"), "export declare function helper(): void;\n");
-		fs.writeFileSync(path.join(extensionsDir, "stray.d.ts"), "export declare function orphan(): void;\n");
-
-		const discovered = discoverExtensionEntryPaths(extensionsDir);
-
-		expect(discovered.map((p) => path.basename(p))).toEqual(["real.ts"]);
-	});
-
-	it("DefaultPackageManager.resolve() skips .d.ts files in auto-collected extensions", async () => {
-		// Pins the third independently implemented guard in
-		// core/package-manager.ts (collectAutoExtensionEntries), reached through
-		// the public DefaultPackageManager.resolve() path.
-		const agentDir = path.join(tempDir, "agent");
-		const userExtensionsDir = path.join(agentDir, "extensions");
-		fs.mkdirSync(userExtensionsDir, { recursive: true });
-		fs.writeFileSync(path.join(userExtensionsDir, "real.js"), extensionCode);
-		fs.writeFileSync(path.join(userExtensionsDir, "real.d.ts"), "export declare function helper(): void;\n");
-		fs.writeFileSync(path.join(userExtensionsDir, "stray.d.ts"), "export declare function orphan(): void;\n");
-
-		const packageManager = new DefaultPackageManager({
-			cwd: tempDir,
-			agentDir,
-			settingsManager: SettingsManager.inMemory(),
-		});
-
-		const resolved = await packageManager.resolve();
-		const extensionNames = resolved.extensions.map((e) => path.basename(e.path));
-
-		expect(extensionNames).toContain("real.js");
-		expect(extensionNames).not.toContain("real.d.ts");
-		expect(extensionNames).not.toContain("stray.d.ts");
 	});
 
 	it("discovers subdirectory with index.ts", async () => {
@@ -269,24 +284,6 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("index.ts");
 	});
 
-	it("treats pi:{} packages as libraries instead of loading index.js", async () => {
-		const subdir = path.join(extensionsDir, "cmux");
-		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "index.js"), "export const helper = () => {};");
-		fs.writeFileSync(
-			path.join(subdir, "package.json"),
-			JSON.stringify({
-				name: "@gsd/cmux",
-				pi: {},
-			}),
-		);
-
-		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(0);
-	});
-
 	it("ignores subdirectory without index or package.json", async () => {
 		const subdir = path.join(extensionsDir, "not-an-extension");
 		fs.mkdirSync(subdir);
@@ -409,11 +406,17 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
-	it("registers message renderers", async () => {
+	it("registers message and entry renderers", async () => {
 		const extCode = `
 			export default function(pi) {
+				pi.registerMarkdownTransformer((markdown) => {
+					return markdown;
+				});
 				pi.registerMessageRenderer("my-custom-type", (message, options, theme) => {
 					return null; // Use default rendering
+				});
+				pi.registerEntryRenderer("my-entry-type", (entry, options, theme) => {
+					return null;
 				});
 			}
 		`;
@@ -423,7 +426,9 @@ describe("extensions discovery", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].markdownTransformer).toBeDefined();
 		expect(result.extensions[0].messageRenderers.has("my-custom-type")).toBe(true);
+		expect(result.extensions[0].entryRenderers?.has("my-entry-type")).toBe(true);
 	});
 
 	it("reports error when extension throws during initialization", async () => {
@@ -539,7 +544,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(explicitPath, extensionCodeWithTool("explicit"));
 
 		// Use loadExtensions directly to skip discovery
-		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
+		const { loadExtensions } = await import("../src/core/extensions/loader.js");
 		const result = await loadExtensions([explicitPath], tempDir);
 
 		expect(result.errors).toHaveLength(0);
@@ -553,7 +558,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCode);
 
 		// Use loadExtensions directly with empty paths
-		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
+		const { loadExtensions } = await import("../src/core/extensions/loader.js");
 		const result = await loadExtensions([], tempDir);
 
 		expect(result.errors).toHaveLength(0);

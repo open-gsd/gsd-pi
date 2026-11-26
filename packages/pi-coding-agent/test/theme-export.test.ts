@@ -1,8 +1,9 @@
+import { colorToHex, okhslColor } from "@gsd/pi-tui";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getThemeExportColors } from "../src/modes/interactive/theme/theme.ts";
+import { getThemeExportColors } from "../src/modes/interactive/theme/theme.js";
 
 type ThemeFile = {
 	name: string;
@@ -37,7 +38,6 @@ describe("getThemeExportColors", () => {
 
 	it("resolves export variable references using the same syntax as colors", () => {
 		const darkTheme = JSON.parse(
-			// allow-source-grep: dark.json is fixture data for custom theme merge tests.
 			readFileSync(new URL("../src/modes/interactive/theme/dark.json", import.meta.url), "utf-8"),
 		) as ThemeFile;
 
@@ -70,9 +70,30 @@ describe("getThemeExportColors", () => {
 		});
 	});
 
+	it("converts OKHSL export colors to hex because CSS does not support them", () => {
+		const darkTheme = JSON.parse(
+			readFileSync(new URL("../src/modes/interactive/theme/dark.json", import.meta.url), "utf-8"),
+		) as ThemeFile;
+		const customTheme: ThemeFile = {
+			...darkTheme,
+			name: "custom-export-okhsl",
+			vars: { card: "okhsl(250 20% 20%)" },
+			export: { pageBg: "okhsl(250 20% 15%)", cardBg: "card", infoBg: "oklch(30% 0.05 80)" },
+		};
+		writeFileSync(
+			join(process.env.PI_CODING_AGENT_DIR!, "themes", "custom-export-okhsl.json"),
+			JSON.stringify(customTheme, null, 2),
+		);
+
+		expect(getThemeExportColors("custom-export-okhsl")).toEqual({
+			pageBg: colorToHex(okhslColor(250, 0.2, 0.15)),
+			cardBg: colorToHex(okhslColor(250, 0.2, 0.2)),
+			infoBg: "oklch(30% 0.05 80)",
+		});
+	});
+
 	it("resolves recursive vars and converts 256-color export values to hex", () => {
 		const darkTheme = JSON.parse(
-			// allow-source-grep: dark.json is fixture data for custom theme merge tests.
 			readFileSync(new URL("../src/modes/interactive/theme/dark.json", import.meta.url), "utf-8"),
 		) as ThemeFile;
 

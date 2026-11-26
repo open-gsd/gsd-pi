@@ -3,9 +3,9 @@ import ignore from "ignore";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
-import { canonicalizePath, resolvePath } from "../utils/paths.js";
+import { isPathWithin, resolvePath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
+import { createSyntheticSourceInfo, getResourcePathKey, type SourceInfo } from "./source-info.js";
 
 /** Max name length per spec */
 const MAX_NAME_LENGTH = 64;
@@ -14,64 +14,11 @@ const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;
 
 const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
-const GSD_CORE_PACKAGE_NAME = "@opengsd/gsd-core";
-const GSD_CORE_MANIFEST_NAME = "gsd-file-manifest.json";
 
 type IgnoreMatcher = ReturnType<typeof ignore>;
-type GsdCoreRoot = "package" | Set<string> | null;
 
 function toPosixPath(p: string): string {
 	return p.split(sep).join("/");
-}
-
-function getGsdCoreRoot(root: string, cache: Map<string, GsdCoreRoot>): GsdCoreRoot {
-	if (cache.has(root)) {
-		return cache.get(root) ?? null;
-	}
-
-	try {
-		const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf-8")) as { name?: string };
-		if (packageJson.name === GSD_CORE_PACKAGE_NAME) {
-			cache.set(root, "package");
-			return "package";
-		}
-	} catch {}
-
-	try {
-		const manifest = JSON.parse(readFileSync(join(root, GSD_CORE_MANIFEST_NAME), "utf-8")) as {
-			files?: Record<string, unknown>;
-		};
-		const files = new Set(Object.keys(manifest.files ?? {}).map(toPosixPath));
-		cache.set(root, files);
-		return files;
-	} catch {
-		cache.set(root, null);
-		return null;
-	}
-}
-
-function isGsdCoreSkill(skill: Skill, rootCache: Map<string, GsdCoreRoot>): boolean {
-	if (!skill.name.startsWith("gsd-")) {
-		return false;
-	}
-
-	for (const filePath of new Set([skill.filePath, canonicalizePath(skill.filePath)])) {
-		const skillsDir = dirname(dirname(filePath));
-		if (basename(skillsDir) !== "skills") {
-			continue;
-		}
-
-		const root = dirname(skillsDir);
-		const gsdCoreRoot = getGsdCoreRoot(root, rootCache);
-		if (gsdCoreRoot === "package") {
-			return true;
-		}
-		if (gsdCoreRoot?.has(toPosixPath(relative(root, filePath)))) {
-			return true;
-		}
-	}
-
-	return false;
 }
 
 function prefixIgnorePattern(line: string, prefix: string): string | null {
@@ -130,21 +77,12 @@ export interface Skill {
 	filePath: string;
 	baseDir: string;
 	sourceInfo: SourceInfo;
-	/** GSD compat: human-readable source label (package name or path). */
-	source: string;
 	disableModelInvocation: boolean;
 }
 
 export interface LoadSkillsResult {
 	skills: Skill[];
 	diagnostics: ResourceDiagnostic[];
-}
-
-let loadedSkillsCache: Skill[] = [];
-
-/** GSD compat: last skills loaded via {@link loadSkills}. */
-export function getLoadedSkills(): Skill[] {
-	return [...loadedSkillsCache];
 }
 
 /**
@@ -176,10 +114,10 @@ function validateName(name: string): string[] {
 /**
  * Validate description per Agent Skills spec.
  */
-function validateDescription(description: string | undefined): string[] {
+function validateDescription(description: unknown): string[] {
 	const errors: string[] = [];
 
-	if (!description || description.trim() === "") {
+	if (typeof description !== "string" || description.trim() === "") {
 		errors.push("description is required");
 	} else if (description.length > MAX_DESCRIPTION_LENGTH) {
 		errors.push(`description exceeds ${MAX_DESCRIPTION_LENGTH} characters (${description.length})`);
@@ -341,50 +279,69 @@ function loadSkillFromFile(
 	source: string,
 ): { skill: Skill | null; diagnostics: ResourceDiagnostic[] } {
 	const diagnostics: ResourceDiagnostic[] = [];
+	const isDeclaredSkill = basename(filePath) === "SKILL.md";
 
+	let rawContent: string;
 	try {
-		const rawContent = readFileSync(filePath, "utf-8");
-		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
-		const skillDir = dirname(filePath);
-		const parentDirName = basename(skillDir);
-
-		// Validate description
-		const descErrors = validateDescription(frontmatter.description);
-		for (const error of descErrors) {
-			diagnostics.push({ type: "warning", message: error, path: filePath });
-		}
-
-		// Use name from frontmatter, or fall back to parent directory name
-		const name = frontmatter.name || parentDirName;
-
-		// Validate name
-		const nameErrors = validateName(name);
-		for (const error of nameErrors) {
-			diagnostics.push({ type: "warning", message: error, path: filePath });
-		}
-
-		// Still load the skill even with warnings (unless description is completely missing)
-		if (!frontmatter.description || frontmatter.description.trim() === "") {
-			return { skill: null, diagnostics };
-		}
-
-		return {
-			skill: {
-				name,
-				description: frontmatter.description,
-				filePath,
-				baseDir: skillDir,
-				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
-				source,
-				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
-			},
-			diagnostics,
-		};
+		rawContent = readFileSync(filePath, "utf-8");
 	} catch (error) {
-		const message = error instanceof Error ? error.message : "failed to parse skill file";
+		const message = error instanceof Error ? error.message : "failed to read skill file";
 		diagnostics.push({ type: "warning", message, path: filePath });
 		return { skill: null, diagnostics };
 	}
+
+	let frontmatter: SkillFrontmatter;
+	try {
+		({ frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent));
+	} catch (error) {
+		if (isDeclaredSkill) {
+			const message = error instanceof Error ? error.message : "failed to parse skill file";
+			diagnostics.push({ type: "warning", message, path: filePath });
+		}
+		return { skill: null, diagnostics };
+	}
+
+	const description = frontmatter.description;
+	const hasDescription = typeof description === "string" && description.trim() !== "";
+	if (!isDeclaredSkill && !hasDescription) {
+		return { skill: null, diagnostics };
+	}
+
+	const skillDir = dirname(filePath);
+	const parentDirName = basename(skillDir);
+
+	// Validate description
+	const descErrors = validateDescription(description);
+	for (const error of descErrors) {
+		diagnostics.push({ type: "warning", message: error, path: filePath });
+	}
+
+	// Use name from frontmatter, or fall back to parent directory name
+	const frontmatterName = typeof frontmatter.name === "string" ? frontmatter.name : undefined;
+	const name = frontmatterName || parentDirName;
+
+	// Validate name
+	const nameErrors = validateName(name);
+	for (const error of nameErrors) {
+		diagnostics.push({ type: "warning", message: error, path: filePath });
+	}
+
+	// Still load the skill even with warnings, unless description is missing or empty.
+	if (!hasDescription) {
+		return { skill: null, diagnostics };
+	}
+
+	return {
+		skill: {
+			name,
+			description,
+			filePath,
+			baseDir: skillDir,
+			sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
+			disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+		},
+		diagnostics,
+	};
 }
 
 /**
@@ -394,8 +351,11 @@ function loadSkillFromFile(
  *
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /skill:name commands).
+ *
+ * `fileReadTool` names the tool that loads skill files; `indirect` names none, for a reader that
+ * is reachable only through another tool.
  */
-export function formatSkillsForPrompt(skills: Skill[]): string {
+export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "bash" | "indirect" = "read"): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
 	if (visibleSkills.length === 0) {
@@ -404,8 +364,12 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use the read tool to load a skill's file when the task matches its description.",
-		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+		fileReadTool === "read"
+			? "Use the read tool to load a skill's file when the task matches its description."
+			: fileReadTool === "bash"
+				? "Use bash to load a skill's file when the task matches its description."
+				: "Load a skill's file when the task matches its description.",
+		"Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.",
 		"",
 		"<available_skills>",
 	];
@@ -446,17 +410,6 @@ export interface LoadSkillsOptions {
 /**
  * Load skills from all configured locations.
  * Returns skills and any validation diagnostics.
- *
- * Name collisions: the first skill loaded for a given name wins. When paths
- * come from PackageManager they arrive pre-sorted by resource precedence
- * (`resourcePrecedenceRank`): settings-entry before auto-discovered, project
- * before user, and bundled GSD before foreign (Claude / `~/.agents`) skills, so
- * bundled auto-mode skills win over same-named foreign skills.
- *
- * Legacy `gsd-*` skills owned by an `@opengsd/gsd-core` package checkout or
- * listed in a gsd-core installer manifest are omitted, including through
- * symlinks. Other skills in those roots and independently authored `gsd-*`
- * skills remain eligible for loading.
  */
 export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	const { agentDir, skillPaths, includeDefaults } = options;
@@ -469,17 +422,12 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	const realPathSet = new Set<string>();
 	const allDiagnostics: ResourceDiagnostic[] = [];
 	const collisionDiagnostics: ResourceDiagnostic[] = [];
-	const gsdCoreRootCache = new Map<string, GsdCoreRoot>();
 
 	function addSkills(result: LoadSkillsResult) {
 		allDiagnostics.push(...result.diagnostics);
 		for (const skill of result.skills) {
-			if (isGsdCoreSkill(skill, gsdCoreRootCache)) {
-				continue;
-			}
-
 			// Resolve symlinks to detect duplicate files
-			const realPath = canonicalizePath(skill.filePath);
+			const realPath = getResourcePathKey(skill.filePath);
 
 			// Skip silently if we've already loaded this exact file (via symlink)
 			if (realPathSet.has(realPath)) {
@@ -514,19 +462,10 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	const userSkillsDir = join(resolvedAgentDir, "skills");
 	const projectSkillsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "skills");
 
-	const isUnderPath = (target: string, root: string): boolean => {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	};
-
 	const getSource = (resolvedPath: string): "user" | "project" | "path" => {
 		if (!includeDefaults) {
-			if (isUnderPath(resolvedPath, userSkillsDir)) return "user";
-			if (isUnderPath(resolvedPath, projectSkillsDir)) return "project";
+			if (isPathWithin(userSkillsDir, resolvedPath)) return "user";
+			if (isPathWithin(projectSkillsDir, resolvedPath)) return "project";
 		}
 		return "path";
 	};
@@ -559,13 +498,8 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		}
 	}
 
-	return finalizeLoadSkillsResult({
+	return {
 		skills: Array.from(skillMap.values()),
 		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
-	});
-}
-
-function finalizeLoadSkillsResult(result: LoadSkillsResult): LoadSkillsResult {
-	loadedSkillsCache = result.skills;
-	return result;
+	};
 }

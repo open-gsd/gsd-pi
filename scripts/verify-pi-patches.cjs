@@ -34,7 +34,16 @@ function resolveDiffBase() {
   return 'HEAD~1'
 }
 
-const PI_PATHSPEC = ['packages/pi-agent-core/', 'packages/pi-ai/', 'packages/pi-tui/', 'packages/pi-coding-agent/']
+const PI_PATHSPEC = [
+  'packages/pi-agent-core/',
+  'packages/pi-ai/',
+  'packages/pi-tui/',
+  'packages/pi-coding-agent/',
+  'packages/pi-schema/',
+  'packages/pi-telemetry/',
+  'packages/pi-mcp/',
+  'packages/pi-codemode/',
+]
 
 function isPiSourceOrTest(file) {
   return PI_PATHSPEC.some((prefix) => file.startsWith(prefix)) && /(^|\/)(src|test)\//.test(file)
@@ -84,6 +93,54 @@ function isAllowlisted(file, allowlist) {
   })
 }
 
+const PACKAGE_MAP = {
+  'packages/pi-agent-core': 'packages/agent',
+  'packages/pi-ai': 'packages/ai',
+  'packages/pi-tui': 'packages/tui',
+  'packages/pi-coding-agent': 'packages/coding-agent',
+  'packages/pi-schema': 'packages/schema',
+  'packages/pi-telemetry': 'packages/telemetry',
+  'packages/pi-mcp': 'packages/mcp',
+  'packages/pi-codemode': 'packages/codemode',
+}
+
+function normalizePiImportText(content) {
+  let c = content
+  c = c.replaceAll('@earendil-works/pi-agent-core', '@gsd/pi-agent-core')
+  c = c.replaceAll('@earendil-works/pi-ai', '@gsd/pi-ai')
+  c = c.replaceAll('@earendil-works/pi-tui', '@gsd/pi-tui')
+  c = c.replaceAll('@earendil-works/pi-coding-agent', '@gsd/pi-coding-agent')
+  c = c.replaceAll('@mariozechner/pi-agent-core', '@gsd/pi-agent-core')
+  c = c.replaceAll('@mariozechner/pi-ai', '@gsd/pi-ai')
+  c = c.replaceAll('@mariozechner/pi-tui', '@gsd/pi-tui')
+  c = c.replaceAll('@mariozechner/pi-coding-agent', '@gsd/pi-coding-agent')
+  c = c.replace(/from "jiti\/static"/g, 'from "@mariozechner/jiti"')
+  c = c.replace(/from 'jiti\/static'/g, "from '@mariozechner/jiti'")
+  c = c.replace(/from "(\.{1,2}\/[^"]+)\.ts"/g, 'from "$1.js"')
+  c = c.replace(/from '(\.{1,2}\/[^']+)\.ts'/g, "from '$1.js'")
+  c = c.replace(/import\("(\.{1,2}\/[^"]+)\.ts"\)/g, 'import("$1.js")')
+  c = c.replace(/declare module "(\.{1,2}\/[^"]+)\.ts"/g, 'declare module "$1.js"')
+  return c
+}
+
+function matchesPinnedUpstream(file) {
+  const cache = join(ROOT, '.cache', 'pi-upstream')
+  if (!existsSync(cache)) return false
+  let upstreamRel = null
+  for (const [gsd, up] of Object.entries(PACKAGE_MAP)) {
+    if (file === gsd || file.startsWith(`${gsd}/`)) {
+      upstreamRel = file === gsd ? up : `${up}/${file.slice(gsd.length + 1)}`
+      break
+    }
+  }
+  if (!upstreamRel) return false
+  const upstreamFile = join(cache, upstreamRel)
+  if (!existsSync(upstreamFile)) return false
+  const local = normalizePiImportText(readFileSync(join(ROOT, file), 'utf8'))
+  const upstream = normalizePiImportText(readFileSync(upstreamFile, 'utf8'))
+  return local === upstream
+}
+
 function main() {
   if (!existsSync(MANIFEST)) {
     process.stderr.write('Missing scripts/pi-upstream.json\n')
@@ -93,8 +150,10 @@ function main() {
   const allowlist = readAllowlist()
   const base = resolveDiffBase()
   const includeBranchRange = process.env.VERIFY_PI_PATCHES_BRANCH === '1'
-  const changed = listChangedPiFiles(base)
-  const undocumented = changed.filter((file) => !isAllowlisted(file, allowlist))
+  const changed = listChangedPiFiles(base).filter((file) => existsSync(join(ROOT, file)))
+  const undocumented = changed.filter(
+    (file) => !isAllowlisted(file, allowlist) && !matchesPinnedUpstream(file),
+  )
 
   if (undocumented.length) {
     process.stderr.write('Undocumented pi-* changes (add to patchAllowlist + pi-upstream.md):\n')

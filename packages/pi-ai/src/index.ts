@@ -1,80 +1,65 @@
-export type { Static, TSchema } from "typebox";
-export { Type } from "typebox";
-
-export * from "./api-registry.js";
-export * from "./env-api-keys.js";
-export * from "./image-models.js";
-export * from "./images.js";
-export * from "./images-api-registry.js";
-export * from "./model-catalog.js";
-export * from "./models.js";
-export type { BedrockOptions, BedrockThinkingDisplay } from "./providers/amazon-bedrock.js";
-export type { AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay } from "./providers/anthropic.js";
-export type { AnthropicVertexOptions } from "./providers/anthropic-vertex.js";
-export type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses.js";
-export * from "./providers/faux.js";
-export type { GoogleOptions } from "./providers/google.js";
-export type { GoogleThinkingLevel } from "./providers/google-shared.js";
-export {
-	sanitizeSchemaForMoonshot,
-	sanitizeSchemaForGoogle,
-	toClaudeInputSchemaRoot,
-} from "./providers/google-shared.js";
-export {
-	collectForbiddenUnionSchemaPaths,
-	requiresMoonshotToolSchemaSanitization,
-	requiresMoonshotToolSchemaSanitizationAnthropic,
-} from "./utils/moonshot-tool-schema.js";
-export type { GoogleVertexOptions } from "./providers/google-vertex.js";
-export * from "./providers/images/register-builtins.js";
-export type { MistralOptions } from "./providers/mistral.js";
-export type {
-	OpenAICodexResponsesOptions,
-	OpenAICodexWebSocketDebugStats,
-} from "./providers/openai-codex-responses.js";
-export type { OpenAICompletionsOptions } from "./providers/openai-completions.js";
-export type { OpenAIResponsesOptions } from "./providers/openai-responses.js";
-export * from "./providers/register-builtins.js";
-export * from "./providers/api-family.js";
-export * from "./session-resources.js";
-export * from "./stream.js";
-export * from "./types.js";
-export * from "./tool-result-content.js";
-export * from "./utils/diagnostics.js";
-export * from "./utils/event-stream.js";
-export * from "./utils/json-parse.js";
-export { hasXmlParameterTags, hasYamlBulletLists, repairToolJson } from "./utils/repair-tool-json.js";
+// Core only, side-effect free: no generated catalogs, no provider factories,
+// no api-registry, no OAuth implementations, no compat. Provider factories
+// live under "@gsd/pi-ai/providers/*", API implementations under
+// "@gsd/pi-ai/api/*", the old global API under
+// "@gsd/pi-ai/compat".
+export type { AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay } from "./api/anthropic-messages.js";
+export type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.js";
+export type { BedrockOptions, BedrockThinkingDisplay } from "./api/bedrock-converse-stream.js";
+export type { GoogleOptions } from "./api/google-generative-ai.js";
+export type { GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel } from "./api/google-shared.js";
+export type { GoogleVertexOptions } from "./api/google-vertex.js";
+export * from "./api/lazy.js";
+export type { MistralOptions } from "./api/mistral-conversations.js";
+export type { OpenAICodexResponsesOptions, OpenAICodexWebSocketDebugStats } from "./api/openai-codex-responses.js";
+export type { OpenAICompletionsOptions } from "./api/openai-completions.js";
+export type { OpenAIResponsesOptions } from "./api/openai-responses.js";
+export type { PiDecisionOptions, PiDecisionRequest, PiDecisionResponse } from "./api/pi-decision.js";
+export type { PiMessagesEvent, PiMessagesOptions, PiMessagesRewriteImpact } from "./api/pi-messages.js";
+export * from "./auth/context.js";
+export * from "./auth/credential-store.js";
+export * from "./auth/helpers.js";
+export * from "./auth/types.js";
+export * from "./cache-warming.js";
 export type {
 	OAuthAuthInfo,
-	OAuthCredentials,
 	OAuthDeviceCodeInfo,
 	OAuthLoginCallbacks,
 	OAuthPrompt,
-	OAuthProvider,
-	OAuthProviderId,
-	OAuthProviderInfo,
-	OAuthProviderInterface,
 	OAuthSelectOption,
 	OAuthSelectPrompt,
-} from "./utils/oauth/types.js";
+} from "./compat/extension-oauth-types.js";
+export * from "./models.js";
+export * from "./models-store.js";
+export * from "./providers/faux.js";
+export * from "./session-resources.js";
+export * from "./types.js";
+export * from "./utils/diagnostics.js";
+export * from "./utils/event-stream.js";
+export * from "./utils/identity.js";
+export * from "./utils/json-parse.js";
 export * from "./utils/overflow.js";
-export * from "./utils/typebox-helpers.js";
-export * from "./utils/repair-tool-json.js";
-export * from "./utils/normalize-tool-arguments.js";
+export * from "./utils/retry.js";
+export * from "./utils/streaming-json.js";
+export * from "./utils/string-enum.js";
+export { contentText, getSystemMessageText, renderSystemMessageUpdate } from "./utils/text.js";
+export * from "./utils/transcript.js";
+export { uuidv7 } from "./utils/uuid.js";
 export * from "./utils/validation.js";
-export * from "./utils/tool-shims.js";
+export { PI_AI_VERSION } from "./utils/version.js";
+export * from "./gsd-compat-types.js";
 export {
-	getProviderCapabilities,
-	getRegisteredApis,
-	getUnsupportedFeatures,
-	mergeCapabilityOverrides,
-	PROVIDER_CAPABILITIES,
-	type ProviderCapabilities,
-} from "./providers/provider-capabilities.js";
+	isEmptyPathToolArguments,
+	normalizeToolArguments,
+} from "./utils/normalize-tool-arguments.js";
+export { normalizeToolResultContent } from "./tool-result-content.js";
+export type { OAuthProviderInterface, OAuthProviderId } from "./oauth-gsd-compat.js";
+export { getOAuthProviders } from "./oauth-gsd-compat.js";
+
+// GSD host compatibility: re-export the most-used compat stream helpers from the
+// package root so existing `@gsd/pi-ai` imports keep resolving after the v1.6.1 split.
 export {
-	notifyProviderSwitchObserver,
-	setProviderSwitchObserver,
-	transformMessagesWithReport,
-	type ProviderSwitchObserver,
-	type ProviderSwitchReport,
-} from "./providers/transform-messages.js";
+	completeSimple,
+	resetApiProviders,
+	streamSimple,
+} from "./compat.js";

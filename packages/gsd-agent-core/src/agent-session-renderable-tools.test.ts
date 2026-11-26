@@ -19,7 +19,7 @@ let testDir: string;
 async function createSession() {
 	const agentDir = join(testDir, "agent-home");
 	const authStorage = AuthStorage.inMemory({});
-	const modelRegistry = new ModelRegistry(authStorage, join(agentDir, "models.json"));
+	const modelRegistry = await ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 	const settingsManager = SettingsManager.inMemory();
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: testDir,

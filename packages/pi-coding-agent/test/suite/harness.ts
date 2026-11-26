@@ -1,28 +1,35 @@
+import { createInMemoryModelRegistry, createModelRegistry, getModelRuntime } from "../model-runtime-test-utils.js";
 /**
  * Local test harness for the new coding-agent test suite.
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { Agent } from "@earendil-works/pi-agent-core";
-import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@earendil-works/pi-ai";
-import { registerFauxProvider } from "@earendil-works/pi-ai";
-import { AgentSession, type AgentSessionEvent } from "@gsd/agent-core";
-import { AuthStorage } from "../../src/core/auth-storage.ts";
-import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
-import { convertToLlm } from "../../src/core/messages.ts";
-import { ModelRegistry } from "../../src/core/model-registry.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
-import type { Settings } from "../../src/core/settings-manager.ts";
-import { SettingsManager } from "../../src/core/settings-manager.ts";
-import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
+import type { AgentMessage, AgentTool } from "@gsd/pi-agent-core";
+import { Agent } from "@gsd/pi-agent-core";
+import type {
+	FauxModelDefinition,
+	FauxProviderRegistration,
+	FauxResponseStep,
+	Model,
+	ToolResultMessage,
+} from "@gsd/pi-ai/compat";
+import { registerFauxProvider, streamSimple } from "@gsd/pi-ai/compat";
+import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.js";
+import { AuthStorage } from "../../src/core/auth-storage.js";
+import type { ExtensionRunner, ExtensionUIContext } from "../../src/core/extensions/index.js";
+import { convertToLlm } from "../../src/core/messages.js";
+import { SessionManager } from "../../src/core/session-manager.js";
+import type { Settings } from "../../src/core/settings-manager.js";
+import { SettingsManager } from "../../src/core/settings-manager.js";
+import type { InlineExtension, ResourceLoader } from "../../src/index.js";
+import { theme } from "../../src/modes/interactive/theme/theme.js";
 import {
 	type CreateTestExtensionsResultInput,
 	createTestExtensionsResult,
 	createTestResourceLoader,
-} from "../utilities.ts";
+} from "../utilities.js";
 
 type MessageTextPart = { type: "text"; text: string };
 
@@ -55,14 +62,66 @@ export function getAssistantTexts(harness: Harness): string[] {
 		.map((message) => getMessageText(message));
 }
 
+/** The latest result of `toolName` in the session transcript. */
+export function getToolResult(harness: Harness, toolName: string): ToolResultMessage {
+	const result = harness.session.messages.findLast(
+		(message): message is ToolResultMessage => message.role === "toolResult" && message.toolName === toolName,
+	);
+	if (!result) throw new Error(`No ${toolName} tool result`);
+	return result;
+}
+
+/** An extension UI context that does nothing, with `overrides` applied. */
+export function createTestUiContext(overrides: Partial<ExtensionUIContext> = {}): ExtensionUIContext {
+	return {
+		select: async () => undefined,
+		confirm: async () => false,
+		input: async () => undefined,
+		notify: () => {},
+		onTerminalInput: () => () => {},
+		setStatus: () => {},
+		setWorkingMessage: () => {},
+		setWorkingVisible: () => {},
+		setWorkingIndicator: () => {},
+		setHiddenThinkingLabel: () => {},
+		setWidget: () => {},
+		setFooter: () => {},
+		setHeader: () => {},
+		setTitle: () => {},
+		custom: async <T>() => undefined as T,
+		pasteToEditor: () => {},
+		setEditorText: () => {},
+		getEditorText: () => "",
+		editor: async () => undefined,
+		addAutocompleteProvider: () => {},
+		setEditorComponent: () => {},
+		getEditorComponent: () => undefined,
+		get theme() {
+			return theme;
+		},
+		getAllThemes: () => [],
+		getTheme: () => undefined,
+		setTheme: () => ({ success: false, error: "Theme switching not available in tests" }),
+		getToolsExpanded: () => false,
+		setToolsExpanded: () => {},
+		...overrides,
+	};
+}
+
 export interface HarnessOptions {
+	provider?: string;
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
-	systemPrompt?: string;
 	tools?: AgentTool[];
+	initialActiveToolNames?: string[];
+	allowedToolNames?: string[];
+	excludedToolNames?: string[];
 	resourceLoader?: ResourceLoader;
-	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
+	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
+	modelsJson?: Record<string, unknown>;
+	/** Session to continue, for example to test a resume. Default: a new in-memory session. */
+	sessionManager?: SessionManager;
 }
 
 export interface Harness {
@@ -92,6 +151,7 @@ function createTempDir(): string {
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const tempDir = createTempDir();
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
+		provider: options.provider,
 		models: options.models,
 	});
 	fauxProvider.setResponses([]);
@@ -100,14 +160,18 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
 	if (withConfiguredAuth) {
-		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
 	}
-	const modelRegistry = ModelRegistry.inMemory(authStorage);
+	const modelsPath = options.modelsJson === undefined ? undefined : join(tempDir, "models.json");
+	if (modelsPath) writeFileSync(modelsPath, JSON.stringify(options.modelsJson));
+	const modelRegistry = modelsPath
+		? await createModelRegistry(authStorage, modelsPath)
+		: await createInMemoryModelRegistry(authStorage);
 	if (withConfiguredAuth) {
 		modelRegistry.registerProvider(model.provider, {
 			baseUrl: model.baseUrl,
@@ -119,6 +183,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				api: registeredModel.api,
 				reasoning: registeredModel.reasoning,
 				input: registeredModel.input,
+				inputLimits: registeredModel.inputLimits,
 				cost: registeredModel.cost,
 				contextWindow: registeredModel.contextWindow,
 				maxTokens: registeredModel.maxTokens,
@@ -129,9 +194,10 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 
 	const agent = new Agent({
 		getApiKey: () => (withConfiguredAuth ? "faux-key" : undefined),
+		streamFn: streamSimple,
 		initialState: {
 			model,
-			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
+			systemPrompt: "",
 			tools: [],
 		},
 		convertToLlm,
@@ -170,9 +236,13 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		sessionManager,
 		settingsManager,
 		cwd: tempDir,
-		modelRegistry,
+		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: toolMap,
+		initialActiveToolNames: options.initialActiveToolNames,
+		usesDefaultTools: options.initialActiveToolNames === undefined,
+		allowedToolNames: options.allowedToolNames,
+		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
 	});
 

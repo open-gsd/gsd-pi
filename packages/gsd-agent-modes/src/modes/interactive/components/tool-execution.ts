@@ -531,6 +531,10 @@ export class ToolExecutionComponent extends Container {
 			expanded: this.expanded,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
+			durationMs: (this.result as { durationMs?: number } | undefined)?.durationMs,
+			outputPad: 0,
+			keyText: (id) => id,
+			keyHint: (id, description) => `${id} ${description}`,
 		};
 	}
 

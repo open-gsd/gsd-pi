@@ -1,0 +1,302 @@
+/**
+ * Temporary compatibility entrypoint preserving the old global pi-ai API
+ * surface: api-dispatch `stream()`/`complete()` with env API key injection,
+ * the api-registry, generated catalog reads (`getModel`/`getModels`/
+ * `getProviders`), per-API lazy stream wrappers, and image generation.
+ *
+ * Existing apps switch imports from "@gsd/pi-ai" to
+ * "@gsd/pi-ai/compat" unchanged; new code uses `createModels()`
+ * and the provider factories. This module is deleted with the coding-agent
+ * ModelManager migration.
+ */
+
+export * from "./api/anthropic-messages.lazy.js";
+export * from "./api/azure-openai-responses.lazy.js";
+export * from "./api/bedrock-converse-stream.lazy.js";
+export * from "./api/google-generative-ai.lazy.js";
+export * from "./api/google-vertex.lazy.js";
+export * from "./api/mistral-conversations.lazy.js";
+export * from "./api/openai-codex-responses.lazy.js";
+export * from "./api/openai-completions.lazy.js";
+export * from "./api/openai-responses.lazy.js";
+export * from "./api/pi-messages.lazy.js";
+export * from "./env-api-keys.js";
+export * from "./image-models.js";
+export * from "./images.js";
+export * from "./images-api-registry.js";
+export * from "./index.js";
+export * from "./legacy-api-aliases.js";
+export * from "./providers/images/register-builtins.js";
+
+import { anthropicMessagesApi } from "./api/anthropic-messages.lazy.js";
+import { azureOpenAIResponsesApi } from "./api/azure-openai-responses.lazy.js";
+import { bedrockConverseStreamApi } from "./api/bedrock-converse-stream.lazy.js";
+import { googleGenerativeAIApi } from "./api/google-generative-ai.lazy.js";
+import { googleVertexApi } from "./api/google-vertex.lazy.js";
+import { mistralConversationsApi } from "./api/mistral-conversations.lazy.js";
+import { openAICodexResponsesApi } from "./api/openai-codex-responses.lazy.js";
+import { openAICompletionsApi } from "./api/openai-completions.lazy.js";
+import { openAIResponsesApi } from "./api/openai-responses.lazy.js";
+import { piMessagesApi } from "./api/pi-messages.lazy.js";
+import { getEnvApiKey } from "./env-api-keys.js";
+import type { ModelsApiStreamOptions } from "./models.js";
+import { builtinModels, getBuiltinModel, getBuiltinModels, getBuiltinProviders } from "./providers/all.js";
+
+export type { BuiltinProvider } from "./providers/all.js";
+
+import { createFauxCore, type FauxProviderRegistration, type RegisterFauxProviderOptions } from "./providers/faux.js";
+import type {
+	Api,
+	ApiStreamOptions,
+	AssistantMessage,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	ProviderStreamOptions,
+	ProviderStreams,
+	SimpleStreamOptions,
+	StreamFunction,
+	StreamOptions,
+	TranscriptContext,
+} from "./types.js";
+import { normalizeContext } from "./utils/transcript.js";
+
+/** @deprecated Static catalog read. Use `getBuiltinModel` from "@gsd/pi-ai/providers/all" or `Models.getModel()`. */
+export const getModel = getBuiltinModel;
+
+/** @deprecated Static catalog read. Use `getBuiltinModels` from "@gsd/pi-ai/providers/all" or `Models.getModels()`. */
+export const getModels = getBuiltinModels;
+
+/** @deprecated Static catalog read. Use `getBuiltinProviders` from "@gsd/pi-ai/providers/all" or `Models.getProviders()`. */
+export const getProviders = getBuiltinProviders;
+
+export type ApiStreamFunction = (
+	model: Model<Api>,
+	context: TranscriptContext,
+	options?: StreamOptions,
+) => AssistantMessageEventStream;
+
+export type ApiStreamSimpleFunction = (
+	model: Model<Api>,
+	context: TranscriptContext,
+	options?: SimpleStreamOptions,
+) => AssistantMessageEventStream;
+
+export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> {
+	api: TApi;
+	stream: StreamFunction<TApi, TOptions>;
+	streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+}
+
+interface ApiProviderInternal {
+	api: Api;
+	stream: ApiStreamFunction;
+	streamSimple: ApiStreamSimpleFunction;
+}
+
+type RegisteredApiProvider = {
+	provider: ApiProviderInternal;
+	sourceId?: string;
+};
+
+const apiProviderRegistry = new Map<string, RegisteredApiProvider>();
+
+function wrapStream<TApi extends Api, TOptions extends StreamOptions>(
+	api: TApi,
+	stream: StreamFunction<TApi, TOptions>,
+): ApiStreamFunction {
+	return (model, context, options) => {
+		if (model.api !== api) {
+			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
+		}
+		return stream(model as Model<TApi>, context, options as TOptions);
+	};
+}
+
+function wrapStreamSimple<TApi extends Api>(
+	api: TApi,
+	streamSimple: StreamFunction<TApi, SimpleStreamOptions>,
+): ApiStreamSimpleFunction {
+	return (model, context, options) => {
+		if (model.api !== api) {
+			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
+		}
+		return streamSimple(model as Model<TApi>, context, options);
+	};
+}
+
+export function registerApiProvider<TApi extends Api, TOptions extends StreamOptions>(
+	provider: ApiProvider<TApi, TOptions>,
+	sourceId?: string,
+): void {
+	apiProviderRegistry.set(provider.api, {
+		provider: {
+			api: provider.api,
+			stream: wrapStream(provider.api, provider.stream),
+			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
+		},
+		sourceId,
+	});
+}
+
+export function getApiProvider(api: Api): ApiProviderInternal | undefined {
+	return apiProviderRegistry.get(api)?.provider;
+}
+
+export function getApiProviders(): ApiProviderInternal[] {
+	return Array.from(apiProviderRegistry.values(), (entry) => entry.provider);
+}
+
+export function unregisterApiProviders(sourceId: string): void {
+	for (const [api, entry] of apiProviderRegistry.entries()) {
+		if (entry.sourceId === sourceId) {
+			apiProviderRegistry.delete(api);
+		}
+	}
+}
+
+function clearApiProviders(): void {
+	apiProviderRegistry.clear();
+}
+
+export function registerFauxProvider(options: RegisterFauxProviderOptions = {}): FauxProviderRegistration {
+	const core = createFauxCore(options);
+	const sourceId = `faux-provider-${Math.random().toString(36).slice(2, 10)}`;
+	registerApiProvider({ api: core.api, stream: core.stream, streamSimple: core.streamSimple }, sourceId);
+	return {
+		api: core.api,
+		models: core.models,
+		getModel: core.getModel,
+		state: core.state,
+		setResponses: core.setResponses,
+		appendResponses: core.appendResponses,
+		getPendingResponseCount: core.getPendingResponseCount,
+		unregister() {
+			unregisterApiProviders(sourceId);
+		},
+	};
+}
+
+const BUILTIN_APIS: [Api, ProviderStreams][] = [
+	["anthropic-messages", anthropicMessagesApi()],
+	["openai-completions", openAICompletionsApi()],
+	["openai-responses", openAIResponsesApi()],
+	["openai-codex-responses", openAICodexResponsesApi()],
+	["azure-openai-responses", azureOpenAIResponsesApi()],
+	["google-generative-ai", googleGenerativeAIApi()],
+	["google-vertex", googleVertexApi()],
+	["mistral-conversations", mistralConversationsApi()],
+	["bedrock-converse-stream", bedrockConverseStreamApi()],
+	["pi-messages", piMessagesApi()],
+];
+
+const builtinApiProviderInstances = new Map<Api, ReturnType<typeof getApiProvider>>();
+
+/**
+ * Registers the builtin API implementations into the api-registry without
+ * clobbering existing entries: compat may load after a test or extension has
+ * already registered an override for a builtin api id.
+ */
+export function registerBuiltInApiProviders(): void {
+	for (const [api, streams] of BUILTIN_APIS) {
+		if (!getApiProvider(api)) {
+			registerApiProvider({ api, stream: streams.stream, streamSimple: streams.streamSimple });
+		}
+		builtinApiProviderInstances.set(api, getApiProvider(api));
+	}
+}
+
+export function resetApiProviders(): void {
+	clearApiProviders();
+	builtinApiProviderInstances.clear();
+	registerBuiltInApiProviders();
+}
+
+registerBuiltInApiProviders();
+
+const compatModels = builtinModels();
+const AMBIENT_AUTH_MARKER = "<authenticated>";
+
+function hasExplicitApiKey(apiKey: string | undefined): apiKey is string {
+	return typeof apiKey === "string" && apiKey.trim().length > 0;
+}
+
+function withEnvApiKey<TOptions extends StreamOptions>(
+	model: Model<Api>,
+	options: TOptions | undefined,
+): TOptions | undefined {
+	if (hasExplicitApiKey(options?.apiKey)) return options;
+	const apiKey = getEnvApiKey(model.provider, options?.env);
+	if (!apiKey || apiKey === AMBIENT_AUTH_MARKER) return options;
+	return { ...options, apiKey } as TOptions;
+}
+
+function hasResolvedCloudflareAuth(options: StreamOptions | undefined): boolean {
+	return hasExplicitApiKey(options?.apiKey) || typeof options?.headers?.["cf-aig-authorization"] === "string";
+}
+
+function getBuiltinProviderForModel(model: Model<Api>) {
+	if (getApiProvider(model.api) !== builtinApiProviderInstances.get(model.api)) return undefined;
+	const provider = compatModels.getProvider(model.provider);
+	return provider?.getModels().some((candidate) => candidate.api === model.api) ? provider : undefined;
+}
+
+function resolveApiProvider(api: Api) {
+	const provider = getApiProvider(api);
+	if (!provider) {
+		throw new Error(`No API provider registered for api: ${api}`);
+	}
+	return provider;
+}
+
+export function stream<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: ProviderStreamOptions,
+): AssistantMessageEventStream {
+	const transcript = normalizeContext(context);
+	const builtinProvider = getBuiltinProviderForModel(model);
+	if (builtinProvider) {
+		if (model.provider.startsWith("cloudflare-") && !hasResolvedCloudflareAuth(options)) {
+			return compatModels.stream(model, transcript, options as ModelsApiStreamOptions<TApi> | undefined);
+		}
+		return builtinProvider.stream(model, transcript, withEnvApiKey(model, options) as ApiStreamOptions<TApi>);
+	}
+	const provider = resolveApiProvider(model.api);
+	return provider.stream(model, transcript, withEnvApiKey(model, options) as StreamOptions);
+}
+
+export async function complete<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: ProviderStreamOptions,
+): Promise<AssistantMessage> {
+	const s = stream(model, context, options);
+	return s.result();
+}
+
+export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	const transcript = normalizeContext(context);
+	const builtinProvider = getBuiltinProviderForModel(model);
+	if (builtinProvider) {
+		if (model.provider.startsWith("cloudflare-") && !hasResolvedCloudflareAuth(options)) {
+			return compatModels.streamSimple(model, transcript, options);
+		}
+		return builtinProvider.streamSimple(model, transcript, withEnvApiKey(model, options));
+	}
+	const provider = resolveApiProvider(model.api);
+	return provider.streamSimple(model, transcript, withEnvApiKey(model, options));
+}
+
+export async function completeSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): Promise<AssistantMessage> {
+	const s = streamSimple(model, context, options);
+	return s.result();
+}

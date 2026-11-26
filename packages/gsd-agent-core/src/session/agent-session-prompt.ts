@@ -8,6 +8,11 @@ import { readFileSync } from "node:fs";
 import { stripFrontmatter } from "@gsd/pi-coding-agent/utils/frontmatter.js";
 import { sleep } from "@gsd/pi-coding-agent/utils/sleep.js";
 import type { PromptOptions } from "./agent-session-types.js";
+import {
+	buildSystemPrompt,
+	type BuildSystemPromptOptions,
+} from "@gsd/pi-coding-agent/core/system-prompt.js";
+import { setAgentSystemPrompt } from "../agent-system-prompt.js";
 import type { AgentSessionHost } from "./agent-session-host.js";
 
 type NoProgressTerminalRetryFingerprint = {
@@ -218,11 +223,13 @@ export class AgentSessionPromptModule {
 
 			// Emit before_agent_start extension event
 			this.host.markTurnLatency("session.before_agent_start.start");
+			const systemPromptOptions: BuildSystemPromptOptions = {
+				...this.host._baseSystemPromptOptions,
+				cwd: this.host._cwd,
+			};
 			const result = await this.host._extensionRunner.emitBeforeAgentStart(
-				expandedText,
-				currentImages,
-				this.host._baseSystemPrompt,
-				this.host._baseSystemPromptOptions,
+				{ messageType: "user", prompt: expandedText, images: currentImages },
+				systemPromptOptions,
 			);
 			// Add all custom messages from extensions
 			if (result?.messages) {
@@ -237,16 +244,11 @@ export class AgentSessionPromptModule {
 					});
 				}
 			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt) {
-				this.host.agent.state.systemPrompt = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this.host.agent.state.systemPrompt = this.host._baseSystemPrompt;
-			}
+			const effectiveSystemPrompt = buildSystemPrompt(result.systemPromptOptions);
+			setAgentSystemPrompt(this.host.agent, effectiveSystemPrompt);
 			this.host.markTurnLatency("session.before_agent_start.end", {
 				customMessages: result?.messages?.length ?? 0,
-				systemPromptChanged: !!result?.systemPrompt,
+				systemPromptChanged: effectiveSystemPrompt !== this.host._baseSystemPrompt,
 			});
 		} catch (error) {
 			latencyStatus = "error";

@@ -1,6 +1,6 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import { getModel } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@gsd/pi-agent-core";
+import type { AssistantMessage, Usage } from "@gsd/pi-ai/compat";
+import { getModel } from "@gsd/pi-ai/compat";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -14,17 +14,18 @@ import {
 	getLastAssistantUsage,
 	prepareCompaction,
 	shouldCompact,
-} from "../src/core/compaction/index.ts";
+} from "../src/core/compaction/index.js";
 import {
 	buildSessionContext,
 	type CompactionEntry,
+	type CustomMessageEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	parseSessionEntries,
 	type SessionEntry,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
-} from "../src/core/session-manager.ts";
+} from "../src/core/session-manager.js";
 
 // ============================================================================
 // Test fixtures
@@ -134,6 +135,21 @@ function createThinkingLevelEntry(thinkingLevel: string): ThinkingLevelChangeEnt
 	return entry;
 }
 
+function createCustomMessageEntry(content: string): CustomMessageEntry {
+	const id = `test-id-${entryCounter++}`;
+	const entry: CustomMessageEntry = {
+		type: "custom_message",
+		id,
+		parentId: lastId,
+		timestamp: new Date().toISOString(),
+		customType: "test",
+		content,
+		display: true,
+	};
+	lastId = id;
+	return entry;
+}
+
 function extractText(messages: AgentMessage[]): string {
 	return messages
 		.map((message) => {
@@ -218,9 +234,40 @@ describe("getLastAssistantUsage", () => {
 		expect(usage!.input).toBe(100);
 	});
 
+	it("should skip all-zero assistant usage", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Hello")),
+			createMessageEntry(createAssistantMessage("Hi", createMockUsage(100, 50))),
+			createMessageEntry(createUserMessage("continue")),
+			createMessageEntry(createAssistantMessage("Partial", createMockUsage(0, 0))),
+		];
+
+		const usage = getLastAssistantUsage(entries);
+		expect(usage).not.toBeNull();
+		expect(usage!.input).toBe(100);
+	});
+
 	it("should return undefined if no assistant messages", () => {
 		const entries: SessionEntry[] = [createMessageEntry(createUserMessage("Hello"))];
 		expect(getLastAssistantUsage(entries)).toBeUndefined();
+	});
+});
+
+describe("estimateContextTokens", () => {
+	it("uses the last non-zero assistant usage as the context anchor", () => {
+		const messages: AgentMessage[] = [
+			createUserMessage("Hello"),
+			createAssistantMessage("Hi", createMockUsage(100, 50)),
+			createUserMessage("continue"),
+			createAssistantMessage("Partial thinking", createMockUsage(0, 0)),
+		];
+
+		const estimate = estimateContextTokens(messages);
+
+		expect(estimate.usageTokens).toBe(150);
+		expect(estimate.lastUsageIndex).toBe(1);
+		expect(estimate.trailingTokens).toBeGreaterThan(0);
+		expect(estimate.tokens).toBe(150 + estimate.trailingTokens);
 	});
 });
 
@@ -306,6 +353,61 @@ describe("findCutPoint", () => {
 			expect(result.isSplitTurn).toBe(true);
 			expect(result.turnStartIndex).toBe(2); // Turn 2 starts at index 2
 		}
+	});
+
+	it("should budget context-visible custom message entries", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("hi")),
+			createMessageEntry(createAssistantMessage("hello")),
+			createCustomMessageEntry("x".repeat(4000)),
+			createMessageEntry(createAssistantMessage("ok")),
+		];
+
+		const tinyBudget = findCutPoint(entries, 0, entries.length, 1);
+		expect(tinyBudget.firstKeptEntryIndex).toBe(3);
+		expect(tinyBudget.isSplitTurn).toBe(true);
+		expect(tinyBudget.turnStartIndex).toBe(2);
+
+		const customFitsBudget = findCutPoint(entries, 0, entries.length, 2);
+		expect(customFitsBudget.firstKeptEntryIndex).toBe(2);
+		expect(customFitsBudget.isSplitTurn).toBe(false);
+		expect(customFitsBudget.turnStartIndex).toBe(-1);
+	});
+
+	// Regression test for #9740.
+	it("should fall back to the latest valid cut point before oversized trailing tool results", () => {
+		const oldUser = createMessageEntry(createUserMessage("old history"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("old answer"));
+		const currentUser = createMessageEntry(createUserMessage("read the large file"));
+		const toolCall = createMessageEntry({
+			...createAssistantMessage(""),
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "big.txt" } }],
+			stopReason: "toolUse",
+		});
+		const toolResult = createMessageEntry({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "x".repeat(8000) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		const entries = [oldUser, oldAssistant, currentUser, toolCall, toolResult];
+
+		const result = findCutPoint(entries, 0, entries.length, 1000);
+		expect(result).toEqual({
+			firstKeptEntryIndex: 3,
+			turnStartIndex: 2,
+			isSplitTurn: true,
+		});
+
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1000,
+		});
+		expect(preparation?.firstKeptEntryId).toBe(toolCall.id);
+		expect(preparation?.messagesToSummarize).toEqual([oldUser.message, oldAssistant.message]);
+		expect(preparation?.turnPrefixMessages).toEqual([currentUser.message]);
 	});
 });
 
@@ -395,8 +497,31 @@ describe("buildSessionContext", () => {
 	});
 });
 
+describe("prepareCompaction", () => {
+	it("does not treat system messages as conversation history", () => {
+		const system = createMessageEntry({
+			role: "system",
+			content: "",
+			sections: { preamble: "current prompt" },
+			timestamp: Date.now(),
+		});
+		const user = createMessageEntry(createUserMessage("one long turn"));
+		const assistant = createMessageEntry(createAssistantMessage("assistant suffix"));
+		const preparation = prepareCompaction([system, user, assistant], {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1,
+		});
+
+		expect(preparation).toBeDefined();
+		expect(preparation?.firstKeptEntryId).toBe(assistant.id);
+		expect(preparation?.isSplitTurn).toBe(true);
+		expect(preparation?.messagesToSummarize).toEqual([]);
+		expect(preparation?.turnPrefixMessages).toEqual([user.message]);
+	});
+});
+
 describe("prepareCompaction with previous compaction", () => {
-	it("should preserve kept messages across repeated compactions when they still fit", () => {
+	it("should skip repeated compactions when kept messages still fit", () => {
 		const u1 = createMessageEntry(createUserMessage("user msg 1 (summarized by compaction1)"));
 		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1"));
 		const u2 = createMessageEntry(createUserMessage("user msg 2 - kept by compaction1"));
@@ -408,29 +533,9 @@ describe("prepareCompaction with previous compaction", () => {
 		const a4 = createMessageEntry(createAssistantMessage("assistant msg 4", createMockUsage(8000, 2000)));
 
 		const pathEntries = [u1, a1, u2, a2, u3, a3, compaction1, u4, a4];
-		const contextBefore = buildSessionContext(pathEntries);
 		const preparation = prepareCompaction(pathEntries, DEFAULT_COMPACTION_SETTINGS);
 
-		expect(preparation).toBeDefined();
-		expect(preparation!.firstKeptEntryId).toBe(u2.id);
-		expect(preparation!.previousSummary).toBe("First summary");
-		expect(extractText(preparation!.messagesToSummarize)).not.toContain("First summary");
-		expect(preparation!.tokensBefore).toBe(estimateContextTokens(contextBefore.messages).tokens);
-
-		const compaction2: CompactionEntry = {
-			type: "compaction",
-			id: "compaction2-id",
-			parentId: a4.id,
-			timestamp: new Date().toISOString(),
-			summary: "Second summary",
-			firstKeptEntryId: preparation!.firstKeptEntryId,
-			tokensBefore: preparation!.tokensBefore,
-		};
-		const contextAfter = buildSessionContext([...pathEntries, compaction2]);
-		const contextAfterText = extractText(contextAfter.messages);
-
-		expect(contextAfterText).toContain("user msg 2 - kept by compaction1");
-		expect(contextAfterText).toContain("user msg 3 - kept by compaction1");
+		expect(preparation).toBeUndefined();
 	});
 
 	it("should re-summarize previously kept messages when the recent window moves past them", () => {

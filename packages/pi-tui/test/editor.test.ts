@@ -1,16 +1,20 @@
 import assert from "node:assert";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
-import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
-import { Editor, wordWrapLine } from "../src/components/editor.ts";
-import { TUI } from "../src/tui.ts";
-import { visibleWidth } from "../src/utils.ts";
-import { defaultEditorTheme } from "./test-themes.ts";
-import { VirtualTerminal } from "../src/tests/virtual-terminal.ts";
+import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.js";
+import { Editor, wordWrapLine } from "../src/components/editor.js";
+import { FAKE_CURSOR_START, renderFakeCursor, type TUI } from "../src/tui.js";
+import { TuiMainScreen } from "../src/tui-main-screen.js";
+import { stripTerminalSequences, visibleWidth } from "../src/utils.js";
+import { defaultEditorTheme } from "./test-themes.js";
+import { VirtualTerminal } from "./virtual-terminal.js";
 
 /** Create a TUI with a virtual terminal for testing */
 function createTestTUI(cols = 80, rows = 24): TUI {
-	return new TUI(new VirtualTerminal(cols, rows));
+	return new TuiMainScreen(new VirtualTerminal(cols, rows));
 }
 
 /** Standard applyCompletion that replaces prefix with item.value */
@@ -79,16 +83,24 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "first");
 		});
 
-		it("returns to empty editor on Down arrow after browsing history", () => {
+		it("jumps to start before entering history from a non-empty draft", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
 			editor.addToHistory("prompt");
+			editor.setText("draft");
+			editor.handleInput("\x1b[D");
+			editor.handleInput("\x1b[D");
 
-			editor.handleInput("\x1b[A"); // Up - shows "prompt"
+			editor.handleInput("\x1b[A"); // Up - jumps to start before history browsing
+			assert.strictEqual(editor.getText(), "draft");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
+
+			editor.handleInput("\x1b[A"); // Up at start - shows "prompt"
 			assert.strictEqual(editor.getText(), "prompt");
 
-			editor.handleInput("\x1b[B"); // Down - clears editor
-			assert.strictEqual(editor.getText(), "");
+			editor.handleInput("\x1b[B"); // Down - restores draft
+			assert.strictEqual(editor.getText(), "draft");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
 		});
 
 		it("navigates forward through history with Down arrow", () => {
@@ -97,8 +109,10 @@ describe("Editor component", () => {
 			editor.addToHistory("first");
 			editor.addToHistory("second");
 			editor.addToHistory("third");
+			editor.setText("draft");
 
 			// Go to oldest
+			editor.handleInput("\x1b[A"); // start of draft
 			editor.handleInput("\x1b[A"); // third
 			editor.handleInput("\x1b[A"); // second
 			editor.handleInput("\x1b[A"); // first
@@ -110,8 +124,8 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[B"); // third
 			assert.strictEqual(editor.getText(), "third");
 
-			editor.handleInput("\x1b[B"); // empty
-			assert.strictEqual(editor.getText(), "");
+			editor.handleInput("\x1b[B"); // draft
+			assert.strictEqual(editor.getText(), "draft");
 		});
 
 		it("exits history mode when typing a character", () => {
@@ -122,7 +136,7 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A"); // Up - shows "old prompt"
 			editor.handleInput("x"); // Type a character - exits history mode
 
-			assert.strictEqual(editor.getText(), "old promptx");
+			assert.strictEqual(editor.getText(), "xold prompt");
 		});
 
 		it("exits history mode on setText", () => {
@@ -168,12 +182,12 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "same");
 		});
 
-		it("allows non-consecutive duplicates in history", () => {
+		it("moves a non-consecutive duplicate to the most recent position", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
 			editor.addToHistory("first");
 			editor.addToHistory("second");
-			editor.addToHistory("first"); // Not consecutive, should be added
+			editor.addToHistory("first");
 
 			editor.handleInput("\x1b[A"); // "first"
 			assert.strictEqual(editor.getText(), "first");
@@ -181,8 +195,24 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A"); // "second"
 			assert.strictEqual(editor.getText(), "second");
 
-			editor.handleInput("\x1b[A"); // "first" (older one)
-			assert.strictEqual(editor.getText(), "first");
+			editor.handleInput("\x1b[A"); // stays at "second" (no older entry)
+			assert.strictEqual(editor.getText(), "second");
+		});
+
+		// #12279: re-rendering a session branch re-adds its prompts on every tree navigation.
+		it("does not grow when the same prompts are re-added", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const browse = (count: number) =>
+				Array.from({ length: count }, () => {
+					editor.handleInput("\x1b[A");
+					return editor.getText();
+				});
+
+			for (const prompt of ["p1", "p2", "p3", "p4", "p5"]) editor.addToHistory(prompt);
+			// Navigating back to p4 re-renders the branch p1..p3.
+			for (const prompt of ["p1", "p2", "p3"]) editor.addToHistory(prompt);
+
+			assert.deepStrictEqual(browse(6), ["p3", "p2", "p1", "p5", "p4", "p4"]);
 		});
 
 		it("uses cursor movement instead of history when editor has content", () => {
@@ -222,61 +252,55 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getText(), "prompt 5");
 		});
 
-		it("allows cursor movement within multi-line history entry with Down", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-
-			editor.addToHistory("line1\nline2\nline3");
-
-			// Browse to the multi-line entry
-			editor.handleInput("\x1b[A"); // Up - shows entry, cursor at end of line3
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
-
-			// Down should exit history since cursor is on last line
-			editor.handleInput("\x1b[B"); // Down
-			assert.strictEqual(editor.getText(), ""); // Exited to empty
-		});
-
-		it("allows cursor movement within multi-line history entry with Up", () => {
+		it("places cursor at start after browsing history upward", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
 			editor.addToHistory("older entry");
 			editor.addToHistory("line1\nline2\nline3");
 
-			// Browse to the multi-line entry
-			editor.handleInput("\x1b[A"); // Up - shows multi-line, cursor at end of line3
+			editor.handleInput("\x1b[A"); // Up - shows multi-line entry at start
+			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
 
-			// Up should move cursor within the entry (not on first line yet)
-			editor.handleInput("\x1b[A"); // Up - cursor moves to line2
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3"); // Still same entry
-
-			editor.handleInput("\x1b[A"); // Up - cursor moves to line1 (now on first visual line)
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3"); // Still same entry
-
-			// Now Up should navigate to older history entry
-			editor.handleInput("\x1b[A"); // Up - navigate to older
+			editor.handleInput("\x1b[A"); // Up again - immediately navigates to older entry
 			assert.strictEqual(editor.getText(), "older entry");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
 		});
 
-		it("navigates from multi-line entry back to newer via Down after cursor movement", () => {
+		it("places cursor at end after browsing history downward", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			editor.addToHistory("older entry");
+			editor.addToHistory("line1\nline2\nline3");
+			editor.addToHistory("newer entry");
+
+			editor.handleInput("\x1b[A"); // newer entry
+			editor.handleInput("\x1b[A"); // multi-line entry
+			editor.handleInput("\x1b[A"); // older entry
+
+			editor.handleInput("\x1b[B"); // Down - shows multi-line entry at end
+			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
+			assert.deepStrictEqual(editor.getCursor(), { line: 2, col: 5 });
+
+			editor.handleInput("\x1b[B"); // Down again - immediately navigates to newer entry
+			assert.strictEqual(editor.getText(), "newer entry");
+		});
+
+		it("allows opposite-direction cursor movement within multi-line history entry", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
 			editor.addToHistory("line1\nline2\nline3");
 
-			// Browse to entry and move cursor up
-			editor.handleInput("\x1b[A"); // Up - shows entry, cursor at end
-			editor.handleInput("\x1b[A"); // Up - cursor to line2
-			editor.handleInput("\x1b[A"); // Up - cursor to line1
+			editor.handleInput("\x1b[A"); // Up - shows entry at start
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
 
-			// Now Down should move cursor down within the entry
-			editor.handleInput("\x1b[B"); // Down - cursor to line2
+			editor.handleInput("\x1b[B"); // Down - cursor moves to line2
 			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
+			assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
 
-			editor.handleInput("\x1b[B"); // Down - cursor to line3
+			editor.handleInput("\x1b[A"); // Up - cursor moves back to line1
 			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
-
-			// Now on last line, Down should exit history
-			editor.handleInput("\x1b[B"); // Down - exit to empty
-			assert.strictEqual(editor.getText(), "");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
 		});
 	});
 
@@ -532,6 +556,15 @@ describe("Editor component", () => {
 			editor.handleInput("\x17");
 			assert.strictEqual(editor.getText(), "foo bar");
 
+			// ASCII punctuation inside Intl word-like segments preserves old boundaries
+			editor.setText("foo.bar");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "foo.");
+
+			editor.setText("foo:bar");
+			editor.handleInput("\x17");
+			assert.strictEqual(editor.getText(), "foo:");
+
 			// Delete across multiple lines
 			editor.setText("line one\nline two");
 			editor.handleInput("\x17");
@@ -590,6 +623,137 @@ describe("Editor component", () => {
 			editor.handleInput("\x01"); // Ctrl+A to go to start
 			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
 			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 6 }); // after 'foo'
+
+			// ASCII punctuation inside Intl word-like segments preserves old boundaries
+			editor.setText("foo.bar baz");
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left over baz
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 8 });
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left over bar
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 4 });
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left over .
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 });
+
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right over foo
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 });
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right over .
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 4 });
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right over bar
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 7 });
+		});
+
+		it("stops at fullwidth Chinese punctuation (issue #4972)", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			// 你好，世界 = 你好(0-2) ，(2-3) 世界(3-5)
+			editor.setText("你好，世界");
+			// Cursor at end (col 5)
+
+			// Move left over 世界
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 }); // after ，
+
+			// Move left over ，
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 }); // after 你好
+
+			// Move left over 你好
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 }); // start
+
+			// Move right over 你好
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 }); // after 你好
+
+			// Move right over ，
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 }); // after ，
+
+			// Move right over 世界
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 }); // end
+		});
+
+		it("handles mixed CJK and ASCII word movement", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			// "hello你好，world世界" = hello(0-5) 你好(5-7) ，(7-8) world(8-13) 世界(13-15)
+			editor.setText("hello你好，world世界");
+			// Cursor at end (col 15)
+
+			// Move left over 世界
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 13 }); // after 'world'
+
+			// Move left over world
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 8 }); // after ，
+
+			// Move left over ，
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 7 }); // after 你好
+
+			// Move left over 你好
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 }); // after 'hello'
+
+			// Move left over hello
+			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 }); // start
+
+			// Forward from start
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 }); // after 'hello'
+
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 7 }); // after 你好
+
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 8 }); // after ，
+
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 13 }); // after 'world'
+
+			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 15 }); // end
+		});
+	});
+
+	describe("Scroll indicators", () => {
+		it("centers scroll indicators on wide borders", () => {
+			const width = 40;
+			const editor = new Editor(createTestTUI(width), defaultEditorTheme);
+			editor.setText(Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"));
+
+			editor.render(width);
+			for (let index = 0; index < 10; index++) editor.handleInput("\x1b[A");
+
+			const lines = editor.render(width);
+			assert.strictEqual(stripVTControlCharacters(lines[0]!), `${"─".repeat(15)} ↑ 9 more ${"─".repeat(15)}`);
+			assert.strictEqual(stripVTControlCharacters(lines.at(-1)!), `${"─".repeat(15)} ↓ 4 more ${"─".repeat(15)}`);
+		});
+
+		it("keeps truncated scroll indicators within width and preserves their color (issue #6962)", () => {
+			const width = 10;
+			const borderColor = (text: string) => `\x1b[35m${text}\x1b[39m`;
+			const editor = new Editor(createTestTUI(width), { ...defaultEditorTheme, borderColor });
+			editor.setText(Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n"));
+
+			// Render once to initialize wrapping, then move the cursor so content remains above and below the viewport.
+			editor.render(width);
+			for (let index = 0; index < 10; index++) editor.handleInput("\x1b[A");
+
+			const lines = editor.render(width);
+			const topBorder = lines[0]!;
+			const bottomBorder = lines.at(-1)!;
+
+			assert.match(stripVTControlCharacters(topBorder), /^─── ↑/);
+			assert.match(stripVTControlCharacters(bottomBorder), /^─── ↓/);
+			assert.strictEqual(topBorder, borderColor(stripVTControlCharacters(topBorder)));
+			assert.strictEqual(bottomBorder, borderColor(stripVTControlCharacters(bottomBorder)));
+			for (const line of lines) {
+				assert.strictEqual(visibleWidth(line), width, `line exceeds width ${width}: ${JSON.stringify(line)}`);
+			}
 		});
 	});
 
@@ -652,7 +816,7 @@ describe("Editor component", () => {
 			}
 
 			// Verify content split correctly
-			const contentLines = lines.slice(1, -1).map((l) => stripVTControlCharacters(l).trim());
+			const contentLines = lines.slice(1, -1).map((l) => stripTerminalSequences(l).trim());
 			assert.strictEqual(contentLines.length, 2);
 			assert.strictEqual(contentLines[0], "日本語テス"); // 5 chars = 10 columns
 			assert.strictEqual(contentLines[1], "ト"); // 1 char = 2 columns (+ padding)
@@ -684,7 +848,7 @@ describe("Editor component", () => {
 
 			// The cursor (reverse video space) should be visible
 			const contentLine = lines[1]!;
-			assert.ok(contentLine.includes("\x1b[7m"), "Should have reverse video cursor");
+			assert.ok(contentLine.includes(FAKE_CURSOR_START), "Should have fake cursor");
 
 			// Line should still be correct width
 			assert.strictEqual(visibleWidth(contentLine), width);
@@ -715,7 +879,7 @@ describe("Editor component", () => {
 				let lines = editor.render(width + paddingX);
 				let contentLines = lines.slice(1, -1);
 				assert.strictEqual(contentLines.length, 1, "Should be 1 content line before wrap");
-				assert.ok(contentLines[0]!.endsWith("\x1b[7m \x1b[0m"), "Cursor should be at end of line");
+				assert.ok(contentLines[0]!.endsWith(renderFakeCursor(" ")), "Cursor should be at end of line");
 
 				// Type 1 more → text wraps to second line
 				editor.handleInput("a");
@@ -735,7 +899,7 @@ describe("Editor component", () => {
 			const lines = editor.render(width);
 
 			// Get content lines (between borders)
-			const contentLines = lines.slice(1, -1).map((l) => stripVTControlCharacters(l).trim());
+			const contentLines = lines.slice(1, -1).map((l) => stripTerminalSequences(l).trim());
 
 			// Should NOT break mid-word
 			// Line 1 should end with a complete word
@@ -1984,6 +2148,317 @@ describe("Editor component", () => {
 	});
 
 	describe("Autocomplete", () => {
+		it("moves the autocomplete selection with selection page keys (#7629)", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: Array.from({ length: 12 }, (_, index) => ({
+						value: `/command-${index}`,
+						label: `command-${index}`,
+					})),
+					prefix: "/",
+				}),
+				applyCompletion,
+			});
+
+			assert.strictEqual(editor.capturesViewportInput, false);
+			editor.handleInput("/");
+			await flushAutocomplete();
+			assert.strictEqual(editor.capturesViewportInput, true);
+
+			editor.handleInput("\x1b[6~");
+			editor.handleInput("\x1b[6~");
+			editor.handleInput("\x1b[5~");
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "/command-5");
+		});
+
+		it("triggers and debounces symbol completion after CJK punctuation", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			for (const before of [
+				"查看，",
+				"\u3000",
+				..."，．：；！？（）［］｛｝“”‘’…—。、「」『』《》【】",
+				"(",
+				"see (",
+				"`",
+				"[",
+			]) {
+				for (const trigger of ["@", "#", "$", "-"]) {
+					const editor = new Editor(createTestTUI(), defaultEditorTheme);
+					const requests: string[] = [];
+					editor.setAutocompleteProvider({
+						triggerCharacters: ["$", "-"],
+						getSuggestions: async (lines, cursorLine, cursorCol) => {
+							requests.push(lines[cursorLine]!.slice(0, cursorCol));
+							return null;
+						},
+						applyCompletion,
+					});
+					editor.setText(before);
+					editor.handleInput(trigger);
+					t.mock.timers.tick(19);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, []);
+					t.mock.timers.tick(1);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [before + trigger]);
+
+					editor.handleInput("r");
+					editor.handleInput("e");
+					t.mock.timers.tick(19);
+					await flushAutocomplete();
+					assert.strictEqual(requests.length, 1);
+					t.mock.timers.tick(1);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [before + trigger, `${before}${trigger}re`]);
+				}
+			}
+		});
+
+		it("does not auto-trigger after CJK letters or for unprefixed paths", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let requests = 0;
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => {
+					requests++;
+					return null;
+				},
+				applyCompletion,
+			});
+			for (const text of [
+				"user@example.com",
+				"张三@example.com",
+				"查看@src",
+				"あ@src",
+				"カ@src",
+				"한@src",
+				"ㄅ@src",
+				"𠮷@src",
+				"か\u3099@src",
+				"禰\u{e0100}@src",
+				"々@src",
+				"Ａ@src",
+				"文档@备份",
+				"prefix#123",
+				"foo(@src",
+				"问题#123",
+				"查看，/path/",
+				"查看，./文档/",
+				"src/index.ts",
+				"./文档/说明.md",
+				"文档/说明.md",
+				"查看src/index.ts",
+			]) {
+				editor.setText("");
+				for (const char of text) editor.handleInput(char);
+				t.mock.timers.tick(20);
+				await flushAutocomplete();
+				assert.strictEqual(requests, 0, text);
+			}
+		});
+
+		it("requests path completion after CJK punctuation only on Tab", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const requests: Array<{ text: string; force: boolean | undefined }> = [];
+			editor.setAutocompleteProvider({
+				getSuggestions: async (lines, cursorLine, cursorCol, options) => {
+					requests.push({ text: lines[cursorLine]!.slice(0, cursorCol), force: options.force });
+					return null;
+				},
+				applyCompletion,
+			});
+			const text = "查看，/path/";
+			for (const char of text) editor.handleInput(char);
+			t.mock.timers.tick(20);
+			await flushAutocomplete();
+			assert.deepStrictEqual(requests, []);
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.deepStrictEqual(requests, [{ text, force: true }]);
+		});
+
+		it("completes Chinese path prefixes after whitespace or CJK punctuation with Tab", async (t) => {
+			const baseDir = mkdtempSync(join(tmpdir(), "pi-editor-autocomplete-"));
+			t.after(() => rmSync(baseDir, { recursive: true, force: true }));
+			mkdirSync(join(baseDir, "文档"));
+			writeFileSync(join(baseDir, "文档", "说明.md"), "text");
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], baseDir));
+			for (const separator of [" ", "\t", "\u3000", "\u00a0", "，", "。"]) {
+				editor.setText(`查看${separator}`);
+				const before = editor.getText();
+				editor.handleInput("文");
+				editor.handleInput("\t");
+				await flushAutocomplete();
+				assert.strictEqual(editor.getText(), `${before}文档/`);
+				editor.handleInput("说");
+				editor.handleInput("\t");
+				await flushAutocomplete();
+				assert.strictEqual(editor.getText(), `${before}文档/说明.md`);
+				assert.deepStrictEqual(editor.getCursor(), { line: 0, col: editor.getText().length });
+			}
+		});
+
+		// Regression test for #12309: Enter on a Tab menu for an absolute path submitted the prompt.
+		it("Enter on a Tab path menu with a / prefix completes without submitting", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: [
+						{ value: "/tmp/x/file-one.md", label: "file-one.md" },
+						{ value: "/tmp/x/file-two.md", label: "file-two.md" },
+					],
+					prefix: "/tmp/x/fi",
+				}),
+				applyCompletion,
+			});
+			editor.setText("look at /tmp/x/fi");
+
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.getText(), "look at /tmp/x/file-one.md");
+		});
+
+		it("Enter on an argument menu with a / prefix completes without submitting", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider(
+					[
+						{
+							name: "open",
+							getArgumentCompletions: (prefix) =>
+								prefix.startsWith("/") ? [{ value: "/tmp/alpha", label: "alpha" }] : null,
+						},
+					],
+					process.cwd(),
+				),
+			);
+
+			for (const char of "/open /tm") editor.handleInput(char);
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(submitted, []);
+			assert.strictEqual(editor.getText(), "/open /tmp/alpha");
+		});
+
+		it("Enter on a Tab slash command menu submits the command", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider([{ name: "model" }, { name: "session" }], process.cwd()),
+			);
+			editor.setText("/mo");
+
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(submitted, ["/model"]);
+		});
+
+		it("ends unquoted trigger and debounce contexts at whitespace or CJK punctuation", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			for (const separator of [" ", "\u3000", "，", "。"]) {
+				for (const trigger of ["@", "#", "$"]) {
+					const editor = new Editor(createTestTUI(), defaultEditorTheme);
+					const requests: string[] = [];
+					const prefix = `${trigger}src`;
+					editor.setAutocompleteProvider({
+						triggerCharacters: ["$"],
+						getSuggestions: async (lines, cursorLine, cursorCol) => {
+							const text = lines[cursorLine]!.slice(0, cursorCol);
+							requests.push(text);
+							return text === prefix ? { prefix, items: [{ value: `${prefix}/`, label: "src/" }] } : null;
+						},
+						applyCompletion,
+					});
+					editor.setText(`${trigger}sr`);
+					editor.handleInput("c");
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.strictEqual(editor.isShowingAutocomplete(), true);
+					editor.handleInput(separator);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [prefix, prefix + separator]);
+					assert.strictEqual(editor.isShowingAutocomplete(), false);
+					editor.handleInput("文");
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [prefix, prefix + separator]);
+				}
+			}
+		});
+
+		it("re-triggers CJK path completion after accepting directories and deleting", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			const provider = new CombinedAutocompleteProvider([], process.cwd());
+			for (const directory of ["文档", "我的 文档", "资料，归档"]) {
+				const quoted = directory !== "文档";
+				const initial = quoted ? `@"${directory.slice(0, 2)}` : "@文";
+				const directoryValue = quoted ? `@"${directory}/"` : `@${directory}/`;
+				const fileValue = quoted ? `@"${directory}/说明.md"` : `@${directory}/说明.md`;
+				const filePrefix = quoted ? `@"${directory}/说` : `@${directory}/说`;
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setAutocompleteProvider({
+					getSuggestions: async (lines, cursorLine, cursorCol) => {
+						const before = lines[cursorLine]!.slice(0, cursorCol);
+						const prefix = before.slice(before.indexOf("@"));
+						if (prefix === initial) {
+							return { prefix, items: [{ value: directoryValue, label: `${directory}/` }] };
+						}
+						return prefix === filePrefix ? { prefix, items: [{ value: fileValue, label: "说明.md" }] } : null;
+					},
+					applyCompletion: (...args) => provider.applyCompletion(...args),
+				});
+				editor.setText(`查看：${initial}`);
+				editor.handleInput("\t");
+				await flushAutocomplete();
+				assert.strictEqual(editor.getText(), `查看：${directoryValue}`);
+				assert.strictEqual(editor.isShowingAutocomplete(), false);
+
+				editor.handleInput("说");
+				t.mock.timers.tick(20);
+				await flushAutocomplete();
+				assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+				for (const deletion of ["\x7f", "\x1b[3~"]) {
+					editor.handleInput("错");
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.strictEqual(editor.isShowingAutocomplete(), false);
+					if (deletion === "\x1b[3~") editor.handleInput("\x1b[D");
+					editor.handleInput(deletion);
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.strictEqual(editor.isShowingAutocomplete(), true);
+				}
+
+				editor.handleInput("\t");
+				assert.strictEqual(editor.getText(), `查看：${fileValue} `);
+				assert.deepStrictEqual(editor.getCursor(), { line: 0, col: editor.getText().length });
+			}
+		});
+
 		it("auto-applies single force-file suggestion without showing menu", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -2154,6 +2629,65 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 		});
 
+		it("re-queries the autocomplete picker when the cursor moves back into the command name", async () => {
+			// Regression for earendil-works/pi#5496: arrowing left out of a slash
+			// command's argument region must re-query the picker, not leave the
+			// stale argument list showing. Before the fix, moveCursor() never
+			// called updateAutocomplete(), so `/cmd ` (argument menu) + Left kept
+			// displaying the arguments against a `/cmd` prefix — and a Tab there
+			// would concatenate the stale suggestion onto the partial command name.
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			const mockProvider: AutocompleteProvider = {
+				getSuggestions: async (lines, _cursorLine, cursorCol) => {
+					const before = (lines[0] || "").slice(0, cursorCol);
+					if (!before.startsWith("/")) return null;
+					// Past the command name (a space before the cursor): offer arguments.
+					if (before.includes(" ")) {
+						return {
+							items: [
+								{ value: "repo", label: "repo" },
+								{ value: "message", label: "message" },
+								{ value: "help", label: "help" },
+							],
+							prefix: before.slice(before.indexOf(" ") + 1),
+						};
+					}
+					// Inside the command name: offer the command name only.
+					return { items: [{ value: "cmd", label: "cmd" }], prefix: before };
+				},
+				applyCompletion,
+			};
+
+			editor.setAutocompleteProvider(mockProvider);
+
+			// Type `/cmd ` so the picker ends up showing the argument list.
+			for (const ch of "/cmd ") {
+				editor.handleInput(ch);
+				await flushAutocomplete();
+			}
+			assert.strictEqual(editor.getText(), "/cmd ");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			const atArg = editor
+				.render(80)
+				.map((l) => stripVTControlCharacters(l))
+				.join("\n");
+			assert.ok(atArg.includes("repo"), "argument menu should be visible at `/cmd `");
+
+			// Arrow Left back into the command name (`/cmd`).
+			editor.handleInput("\x1b[D");
+			await flushAutocomplete();
+
+			// The picker must have re-queried: the stale argument items are gone
+			// (replaced by the command-name suggestion, or the picker closed).
+			const afterMove = editor
+				.render(80)
+				.map((l) => stripVTControlCharacters(l))
+				.join("\n");
+			assert.ok(!afterMove.includes("repo"), "stale argument menu must not survive the cursor move");
+			assert.ok(!afterMove.includes("message"), "stale argument menu must not survive the cursor move");
+		});
+
 		it("debounces # autocomplete while typing", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			let suggestionCalls = 0;
@@ -2185,6 +2719,58 @@ describe("Editor component", () => {
 
 			assert.strictEqual(suggestionCalls, 1);
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
+		});
+
+		it("debounces custom triggerCharacters autocomplete while typing", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let suggestionCalls = 0;
+
+			editor.setAutocompleteProvider({
+				triggerCharacters: ["$"],
+				getSuggestions: async (lines, _cursorLine, cursorCol) => {
+					suggestionCalls += 1;
+					const prefix = (lines[0] || "").slice(0, cursorCol);
+					return { items: [{ value: "$skill-name", label: "skill-name" }], prefix };
+				},
+				applyCompletion,
+			});
+
+			editor.handleInput("$");
+			editor.handleInput("s");
+			editor.handleInput("k");
+
+			assert.strictEqual(suggestionCalls, 0);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			await flushAutocomplete();
+
+			assert.strictEqual(suggestionCalls, 1);
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+		});
+
+		it("resets custom triggerCharacters when provider changes", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let suggestionCalls = 0;
+
+			editor.setAutocompleteProvider({
+				triggerCharacters: ["$"],
+				getSuggestions: async () => ({ items: [{ value: "$skill-name", label: "skill-name" }], prefix: "$" }),
+				applyCompletion,
+			});
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => {
+					suggestionCalls += 1;
+					return { items: [{ value: "$skill-name", label: "skill-name" }], prefix: "$" };
+				},
+				applyCompletion,
+			});
+
+			editor.handleInput("$");
+			editor.handleInput("s");
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			await flushAutocomplete();
+
+			assert.strictEqual(suggestionCalls, 0);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
 		it("aborts active @ autocomplete when typing continues", async () => {
@@ -2313,18 +2899,11 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
-			const submitted: string[] = [];
-			editor.onSubmit = (text) => {
-				submitted.push(text);
-			};
-
-			// Press Enter - should apply the exact typed value "two", not the first item.
-			// The argument was already typed in full, so the same Enter runs the command
-			// instead of being spent on a completion that changes nothing (#2598).
+			// Press Enter - should apply the exact typed value "two", not the first item
 			editor.handleInput("\r");
 
-			assert.deepStrictEqual(submitted, ["/argtest two"]);
-			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			// The exact typed value "two" should be retained
+			assert.strictEqual(editor.getText(), "/argtest two");
 		});
 
 		it("selects first prefix match on Enter when typed arg is not exact match", async () => {
@@ -2373,16 +2952,9 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
-			const submitted: string[] = [];
-			editor.onSubmit = (text) => {
-				submitted.push(text);
-			};
-
-			// Press Enter - "t" prefix matches "two" (first in list), so "two" is applied.
-			// The text changed, so this Enter only accepts the completion.
+			// Press Enter - "t" prefix matches "two" (first in list), so "two" is applied
 			editor.handleInput("\r");
 			assert.strictEqual(editor.getText(), "/argtest two");
-			assert.deepStrictEqual(submitted, []);
 		});
 
 		it("highlights unique prefix match as user types (before full exact match)", async () => {
@@ -2536,52 +3108,11 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
-			const submitted: string[] = [];
-			editor.onSubmit = (text) => {
-				submitted.push(text);
-			};
-
-			// Press Enter - should keep the exact typed value, not apply the first
-			// highlighted item, and run the command with it.
+			// Press Enter - should retain exact typed value, not apply first highlighted item
 			editor.handleInput("\r");
 
-			assert.deepStrictEqual(submitted, ["/model gpt-4o-mini"]);
-		});
-
-		it("does not submit a prose message when Enter accepts a completion that changes nothing", async () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-
-			// Completion for an "@" reference that is already typed in full.
-			const mockProvider: AutocompleteProvider = {
-				getSuggestions: async (lines, _cursorLine, cursorCol) => {
-					const beforeCursor = (lines[0] || "").slice(0, cursorCol);
-					const match = beforeCursor.match(/(@\S+)$/);
-					if (match && "@notes".startsWith(match[1]!)) {
-						return { items: [{ value: "@notes", label: "notes" }], prefix: match[1]! };
-					}
-					return null;
-				},
-				applyCompletion,
-			};
-			editor.setAutocompleteProvider(mockProvider);
-
-			const submitted: string[] = [];
-			editor.onSubmit = (text) => {
-				submitted.push(text);
-			};
-
-			for (const ch of "read @notes") editor.handleInput(ch);
-			// "@" completion is debounced.
-			await new Promise((resolve) => setTimeout(resolve, 50));
-			await flushAutocomplete();
-			assert.strictEqual(editor.isShowingAutocomplete(), true);
-
-			// Only slash commands run on this Enter; a message under composition stays put.
-			editor.handleInput("\r");
-
-			assert.deepStrictEqual(submitted, []);
-			assert.strictEqual(editor.getText(), "read @notes");
-			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			// The exact typed value should be retained
+			assert.strictEqual(editor.getText(), "/model gpt-4o-mini");
 		});
 
 		it("awaits async slash command argument completions", async () => {
@@ -3391,6 +3922,11 @@ describe("Editor component", () => {
 			return editor.getText();
 		}
 
+		/** Helper: 12-line paste content with a distinguishing tag */
+		function bigPaste(tag: string): string {
+			return Array.from({ length: 12 }, (_, i) => `${tag}${i}`).join("\n");
+		}
+
 		it("creates a paste marker for large pastes", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const text = pasteWithMarker(editor);
@@ -3526,6 +4062,97 @@ describe("Editor component", () => {
 			// Undo
 			editor.handleInput("\x1b[45;5u");
 			assert.strictEqual(editor.getText(), textBefore);
+		});
+
+		it("undo after paste marker deletion restores the paste registry", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const paste = bigPaste("alpha");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			editor.handleInput("\x7f"); // delete the marker
+			editor.handleInput("\x1b[45;5u"); // undo: restores marker text and registry
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, paste);
+		});
+
+		it("undo after deleting the first of two paste markers restores both registry entries", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const pasteA = bigPaste("alpha");
+			const pasteB = bigPaste("beta");
+			editor.handleInput(`\x1b[200~${pasteA}\x1b[201~`); // #1 = A
+			editor.handleInput(`\x1b[200~${pasteB}\x1b[201~`); // #2 = B, cursor at end
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[C"); // right over marker #1
+			editor.handleInput("\x7f"); // delete marker #1, renumbers #2 -> #1
+			editor.handleInput("\x1b[45;5u"); // undo
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, pasteA + pasteB);
+		});
+
+		it("renumbers the paste registry in ascending id order when markers are out of order in text", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const pasteA = bigPaste("alpha");
+			const pasteB = bigPaste("beta");
+			const pasteC = bigPaste("gamma");
+			editor.handleInput(`\x1b[200~${pasteA}\x1b[201~`); // #1 = A
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput(`\x1b[200~${pasteB}\x1b[201~`); // #2 = B, text: [#2][#1]
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput(`\x1b[200~${pasteC}\x1b[201~`); // #3 = C, text: [#3][#2][#1]
+			editor.handleInput("\x05"); // Ctrl+E
+			editor.handleInput("\x7f"); // delete marker #1, renumber #3 -> #2 and #2 -> #1
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, pasteC + pasteB);
+		});
+
+		// Regression test for #11923
+		it("renumbers short paste markers without a size suffix", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const pasteA = bigPaste("alpha");
+			const pasteB = bigPaste("beta");
+			editor.handleInput(`\x1b[200~${pasteA}\x1b[201~`); // #1 = A
+			editor.handleInput(`\x1b[200~${pasteB}\x1b[201~`); // #2 = B
+			editor.handleInput("\x15"); // Ctrl+U clears the line, registry stays
+			for (const ch of "[paste #1][paste #2]") editor.handleInput(ch);
+			editor.handleInput("\x1b[D"); // left over marker #2
+			editor.handleInput("\x7f"); // delete marker #1, renumber #2 -> #1
+			assert.strictEqual(editor.getText(), "[paste #1]");
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, pasteB);
+		});
+
+		it("undo after setText restores paste markers and registry", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const paste = bigPaste("alpha");
+			editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			editor.setText("replacement");
+			editor.handleInput("\x1b[45;5u"); // undo
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, paste);
 		});
 
 		it("handles multiple paste markers in same line", () => {

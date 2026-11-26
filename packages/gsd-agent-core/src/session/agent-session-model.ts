@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@gsd/pi-agent-core";
 import type { AssistantMessage, Model } from "@gsd/pi-ai";
 import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual, streamSimple } from "@gsd/pi-ai";
+import { toRecordHeaders } from "../provider-headers.js";
 import { formatNoApiKeyFoundMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
 import { DEFAULT_THINKING_LEVEL } from "@gsd/pi-coding-agent/core/defaults.js";
 import { findInitialModel } from "@gsd/pi-coding-agent/core/model-resolver.js";
@@ -23,7 +24,7 @@ export class AgentSessionModelModule {
 			throw new Error(result.error);
 		}
 		if (result.apiKey) {
-			return { apiKey: result.apiKey, headers: result.headers };
+			return { apiKey: result.apiKey, headers: toRecordHeaders(result.headers) };
 		}
 
 		const isOAuth = this.host.modelRegistry.isUsingOAuth(model);
@@ -41,12 +42,12 @@ export class AgentSessionModelModule {
 		apiKey?: string;
 		headers?: Record<string, string>;
 	}> {
-		if (this.host.agent.streamFn === streamSimple) {
+		if (this.host.agent.streamFunction === streamSimple) {
 			return this.getRequiredRequestAuth(model);
 		}
 
 		const result = await this.host.modelRegistry.getApiKeyAndHeaders(model);
-		return result.ok ? { apiKey: result.apiKey, headers: result.headers } : {};
+		return result.ok ? { apiKey: result.apiKey, headers: toRecordHeaders(result.headers) } : {};
 	}
 
 	async emitModelSelect(
@@ -124,7 +125,7 @@ export class AgentSessionModelModule {
 				defaultProvider: this.host.settingsManager.getDefaultProvider(),
 				defaultModelId: this.host.settingsManager.getDefaultModel(),
 				defaultThinkingLevel: this.host.settingsManager.getDefaultThinkingLevel(),
-				modelRegistry: this.host.modelRegistry,
+				modelRuntime: this.host.modelRegistry.getModelRuntime(),
 			});
 			resolved = result.model;
 		}

@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2024",
-    "module": "Node16",
+    "module": "NodeNext",
     "lib": [
       "ES2024"
     ],
@@ -15,9 +15,9 @@
     "sourceMap": true,
     "inlineSources": true,
     "inlineSourceMap": false,
-    "moduleResolution": "Node16",
+    "moduleResolution": "NodeNext",
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": false,
+    "allowImportingTsExtensions": true,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
     "useDefineForClassFields": false,
@@ -25,7 +25,8 @@
       "node"
     ],
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "rewriteRelativeImportExtensions": true
   },
   "include": [
     "src/**/*"
@@ -33,6 +34,9 @@
   "exclude": [
     "node_modules",
     "dist",
-    "**/*.test.ts"
+    "**/*.test.ts",
+    "**/*.d.ts",
+    "src/**/*.d.ts",
+    "src/**/*.test.ts"
   ]
 }

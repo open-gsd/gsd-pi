@@ -8,17 +8,17 @@
  * - Edge cases and integration between parsing and substitution
  */
 
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterAll, describe, expect, test } from "vitest";
-import { getAgentDir } from "../src/config.ts";
+import { getAgentDir } from "../src/config.js";
 import {
 	expandPromptTemplate,
 	loadPromptTemplates,
 	parseCommandArgs,
 	substituteArgs,
-} from "../src/core/prompt-templates.ts";
+} from "../src/core/prompt-templates.js";
 
 // ============================================================================
 // substituteArgs
@@ -191,6 +191,61 @@ describe("substituteArgs", () => {
 });
 
 // ============================================================================
+// substituteArgs - Positional Defaults
+// ============================================================================
+
+describe("substituteArgs - positional defaults", () => {
+	test("should use default when positional arg is missing", () => {
+		expect(substituteArgs(`List exactly \${1:-7} next steps`, [])).toBe("List exactly 7 next steps");
+	});
+
+	test("should support defaults for all arguments", () => {
+		const template = `\${@:-default}\n\${ARGUMENTS:-default}`;
+
+		expect(substituteArgs(template, [])).toBe("default\ndefault");
+		expect(substituteArgs(template, ["This", "would", "be", "the", "arguments"])).toBe(
+			"This would be the arguments\nThis would be the arguments",
+		);
+	});
+
+	test("should use positional arg when present", () => {
+		expect(substituteArgs(`List exactly \${1:-7} next steps`, ["3"])).toBe("List exactly 3 next steps");
+	});
+
+	test("should use default when positional arg is empty", () => {
+		expect(substituteArgs(`Mode: \${1:-brief}`, [""])).toBe("Mode: brief");
+	});
+
+	test("should support multiple positional defaults", () => {
+		expect(substituteArgs(`\${1:-7} \${2:-brief}`, [])).toBe("7 brief");
+		expect(substituteArgs(`\${1:-7} \${2:-brief}`, ["3"])).toBe("3 brief");
+		expect(substituteArgs(`\${1:-7} \${2:-brief}`, ["3", "verbose"])).toBe("3 verbose");
+	});
+
+	test("should not recursively substitute patterns in arg values", () => {
+		expect(substituteArgs(`\${1:-7}`, ["$ARGUMENTS"])).toBe("$ARGUMENTS");
+		expect(substituteArgs(`\${1:-7}`, ["$1"])).toBe("$1");
+	});
+
+	test("should not recursively substitute patterns in default values", () => {
+		expect(substituteArgs(`\${1:-$ARGUMENTS}`, ["a", "b"])).toBe("a");
+		expect(substituteArgs(`\${3:-$ARGUMENTS}`, ["a", "b"])).toBe("$ARGUMENTS");
+	});
+
+	test("should support defaults with spaces", () => {
+		expect(substituteArgs(`\${1:-seven steps}`, [])).toBe("seven steps");
+	});
+
+	test("should support out-of-range positional defaults", () => {
+		expect(substituteArgs(`\${3:-fallback}`, ["a", "b"])).toBe("fallback");
+	});
+
+	test("should mix positional defaults with existing placeholders", () => {
+		expect(substituteArgs(`$1 \${2:-x} $ARGUMENTS`, ["a"])).toBe("a x a");
+	});
+});
+
+// ============================================================================
 // substituteArgs - Array Slicing (Bash-Style)
 // ============================================================================
 
@@ -328,8 +383,10 @@ describe("parseCommandArgs", () => {
 	});
 
 	test("should handle quoted empty string", () => {
-		// Note: Empty quotes are skipped by current implementation
-		expect(parseCommandArgs('"" " "')).toEqual([" "]);
+		// Empty quotes keep their position as an empty argument (#10867)
+		expect(parseCommandArgs('"" " "')).toEqual(["", " "]);
+		expect(parseCommandArgs("a '' c")).toEqual(["a", "", "c"]);
+		expect(parseCommandArgs('a ""')).toEqual(["a", ""]);
 	});
 
 	test("should handle arguments with special characters", () => {
@@ -360,8 +417,36 @@ describe("parseCommandArgs", () => {
 	});
 
 	test("should handle escaped quotes inside quoted strings", () => {
-		// Note: This implementation doesn't handle escaped quotes - backslash is literal
-		expect(parseCommandArgs('"quoted \\"text\\""')).toEqual(["quoted \\text\\"]);
+		// A backslash escapes the enclosing quote character inside a quoted argument (#11861)
+		expect(parseCommandArgs('"quoted \\"text\\""')).toEqual(['quoted "text"']);
+		expect(parseCommandArgs("'it\\'s here' next")).toEqual(["it's here", "next"]);
+		// Other backslashes stay literal, so paths keep them
+		expect(parseCommandArgs("\"C:\\dir\\file\" '\\\\server\\share'")).toEqual(["C:\\dir\\file", "\\\\server\\share"]);
+		expect(parseCommandArgs("\"it's\" 'a\\\"b'")).toEqual(["it's", 'a\\"b']);
+		// Outside quotes a backslash is literal
+		expect(parseCommandArgs('say \\"hi')).toEqual(["say", '\\"hi']);
+	});
+
+	test("should keep apostrophes inside words", () => {
+		// Apostrophes in normal English must not open a quote (#11861)
+		expect(parseCommandArgs("why doesn't the user's cache work")).toEqual([
+			"why",
+			"doesn't",
+			"the",
+			"user's",
+			"cache",
+			"work",
+		]);
+		expect(parseCommandArgs("why doesn't this work")).toEqual(["why", "doesn't", "this", "work"]);
+	});
+
+	test("should treat an unclosed quote as literal text", () => {
+		// A quote without a closing match is kept as text (#11861)
+		expect(parseCommandArgs("'tis the season")).toEqual(["'tis", "the", "season"]);
+		expect(parseCommandArgs('say "hello world')).toEqual(["say", '"hello', "world"]);
+		expect(parseCommandArgs("a '")).toEqual(["a", "'"]);
+		expect(parseCommandArgs('"abc\\"')).toEqual(['"abc\\"']);
+		expect(parseCommandArgs("\"it's\" 'x")).toEqual(["it's", "'x"]);
 	});
 
 	test("should handle trailing spaces", () => {
@@ -378,6 +463,24 @@ describe("parseCommandArgs", () => {
 // ============================================================================
 
 describe("expandPromptTemplate", () => {
+	// #10867
+	test("should use positional default for empty quoted argument without shifting later args", () => {
+		const template = {
+			name: "review",
+			description: "test",
+			content: `Review $2. Focus: \${1:-correctness}.`,
+			sourceInfo: { path: "/tmp/review.md", source: "local", scope: "temporary", origin: "top-level" } as const,
+			filePath: "/tmp/review.md",
+		};
+
+		expect(expandPromptTemplate('/review "" src/index.ts', [template])).toBe(
+			"Review src/index.ts. Focus: correctness.",
+		);
+		expect(expandPromptTemplate("/review '' src/index.ts", [template])).toBe(
+			"Review src/index.ts. Focus: correctness.",
+		);
+	});
+
 	test("should split template arguments on unquoted newlines", () => {
 		const result = expandPromptTemplate("/arg-test label-2\n\nHere is some description #2.", [
 			{
@@ -460,7 +563,7 @@ argument-hint: "<PR-URL>"
 You are given one or more GitHub PR URLs: $@`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -483,7 +586,7 @@ argument-hint: "[instructions]"
 Wrap it. Additional instructions: $ARGUMENTS`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -505,7 +608,7 @@ description: Audit changelog entries before release
 Audit changelog entries for all commits since the last release.`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -527,7 +630,7 @@ argument-hint: ""
 Do something`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -549,7 +652,7 @@ argument-hint: "<issue>"
 Analyze GitHub issue(s): $ARGUMENTS`,
 		);
 
-		const templates = loadPromptTemplates({
+		const { templates } = loadPromptTemplates({
 			cwd: process.cwd(),
 			agentDir: getAgentDir(),
 			promptPaths: [testDir],
@@ -565,5 +668,35 @@ Analyze GitHub issue(s): $ARGUMENTS`,
 		try {
 			rmSync(testDir, { recursive: true, force: true });
 		} catch {}
+	});
+});
+
+describe("loadPromptTemplates - diagnostics", () => {
+	// Regression test for #9354.
+	test("reports invalid YAML frontmatter and keeps valid siblings", () => {
+		const testDir = mkdtempSync(join(tmpdir(), "pi-test-prompts-invalid-"));
+		const invalidPromptPath = join(testDir, "invalid.md");
+		try {
+			writeFileSync(invalidPromptPath, "---\ndescription: Broken: unquoted colon\n---\nDo something.\n");
+			writeFileSync(join(testDir, "valid.md"), "Valid prompt content.");
+
+			const { templates, diagnostics } = loadPromptTemplates({
+				cwd: process.cwd(),
+				agentDir: getAgentDir(),
+				promptPaths: [testDir],
+				includeDefaults: false,
+			});
+
+			expect(templates.map((template) => template.name)).toEqual(["valid"]);
+			expect(diagnostics).toEqual([
+				expect.objectContaining({
+					type: "warning",
+					path: invalidPromptPath,
+					message: expect.stringContaining("line 1, column 14"),
+				}),
+			]);
+		} finally {
+			rmSync(testDir, { recursive: true, force: true });
+		}
 	});
 });

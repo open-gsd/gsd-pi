@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionAPI } from "../../../src/index.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import type { ExtensionAPI } from "../../../src/index.js";
+import { createHarness, type Harness } from "../harness.js";
 
 describe("regression #3686: session name changes emit an event", () => {
 	const harnesses: Harness[] = [];
@@ -36,5 +36,26 @@ describe("regression #3686: session name changes emit an event", () => {
 
 		expect(harness.sessionManager.getSessionName()).toBe("from extension");
 		expect(harness.eventsOfType("session_info_changed").map((event) => event.name)).toEqual(["from extension"]);
+	});
+
+	it("emits session_info_changed to extensions", async () => {
+		let api: ExtensionAPI | undefined;
+		const events: Array<{ name: string | undefined }> = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					api = pi;
+					pi.on("session_info_changed", (event) => {
+						events.push({ name: event.name });
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		api?.setSessionName("first");
+		harness.session.setSessionName("second");
+
+		expect(events).toEqual([{ name: "first" }, { name: "second" }]);
 	});
 });

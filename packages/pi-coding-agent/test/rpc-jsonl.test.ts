@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import { describe, expect, test } from "vitest";
-import { attachJsonlLineReader, serializeJsonLine } from "../src/modes/rpc/jsonl.ts";
+import { attachJsonlLineReader, serializeJsonLine } from "../src/modes/rpc/jsonl.js";
 
 describe("RPC JSONL framing", () => {
 	test("serializes strict JSONL records without escaping Unicode separators", () => {
@@ -27,6 +27,22 @@ describe("RPC JSONL framing", () => {
 
 		expect(lines).toHaveLength(1);
 		expect(JSON.parse(lines[0])).toEqual({ text: "a\u2028b\u2029c" });
+	});
+
+	// Regression test for #12224: a line handler that throws must not leave its line to be joined with the next one.
+	test("does not join a line whose handler threw with the next line", () => {
+		const lines: string[] = [];
+		const stream = new Readable({ read() {} });
+		attachJsonlLineReader(stream, (line) => {
+			lines.push(line);
+			if (line === "prefix") throw new Error("handler failed");
+		});
+
+		stream.emit("data", "pre");
+		expect(() => stream.emit("data", "fix\n")).toThrow("handler failed");
+		stream.emit("data", "next\n");
+
+		expect(lines).toEqual(["prefix", "next"]);
 	});
 
 	test("handles CRLF-delimited input", async () => {

@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
 	type BranchSummaryEntry,
+	buildContextEntries,
 	buildSessionContext,
 	type CompactionEntry,
+	type CustomEntry,
 	type ModelChangeEntry,
 	type SessionEntry,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
-} from "../../src/core/session-manager.ts";
+} from "../../src/core/session-manager.js";
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };
@@ -50,6 +52,10 @@ function compaction(id: string, parentId: string | null, summary: string, firstK
 
 function branchSummary(id: string, parentId: string | null, summary: string, fromId: string): BranchSummaryEntry {
 	return { type: "branch_summary", id, parentId, timestamp: "2025-01-01T00:00:00Z", summary, fromId };
+}
+
+function custom(id: string, parentId: string | null, customType: string, data?: unknown): CustomEntry {
+	return { type: "custom", id, parentId, timestamp: "2025-01-01T00:00:00Z", customType, data };
 }
 
 function thinkingLevel(id: string, parentId: string | null, level: string): ThinkingLevelChangeEntry {
@@ -168,6 +174,51 @@ describe("buildSessionContext", () => {
 			// Should use second summary, keep from 4
 			expect(ctx.messages).toHaveLength(4);
 			expect((ctx.messages[0] as any).summary).toContain("Second summary");
+		});
+
+		it("buildContextEntries returns compaction-aware entries including custom entries", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				custom("2", "1", "old-state", { hidden: true }),
+				msg("3", "2", "assistant", "response1"),
+				custom("4", "3", "kept-card", { title: "Kept" }),
+				msg("5", "4", "user", "second"),
+				compaction("6", "5", "Summary", "4"),
+				custom("7", "6", "after-card", { title: "After" }),
+				msg("8", "7", "assistant", "response2"),
+			];
+
+			expect(buildContextEntries(entries).map((entry) => entry.id)).toEqual(["6", "4", "5", "7", "8"]);
+			const ctx = buildSessionContext(entries);
+			expect(ctx.messages.map((message) => message.role)).toEqual(["compactionSummary", "user", "assistant"]);
+		});
+
+		it("keeps settings from the full path after compaction", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "first"),
+				thinkingLevel("2", "1", "high"),
+				msg("3", "2", "assistant", "response1"),
+				msg("4", "3", "user", "second"),
+				compaction("5", "4", "Summary", "4"),
+			];
+
+			const ctx = buildSessionContext(entries);
+			expect(ctx.thinkingLevel).toBe("high");
+			expect(ctx.messages.map((message) => message.role)).toEqual(["compactionSummary", "user"]);
+		});
+
+		it("handles more entries after compaction than fit in the call stack", () => {
+			const entries: SessionEntry[] = [msg("1", null, "user", "first"), compaction("2", "1", "Summary", "1")];
+			let parentId = "2";
+			for (let i = 0; i < 200_000; i++) {
+				entries.push(custom(`c${i}`, parentId, "bulk"));
+				parentId = `c${i}`;
+			}
+			entries.push(msg("last", parentId, "user", "last"));
+
+			expect(buildContextEntries(entries)).toHaveLength(200_003);
+			const ctx = buildSessionContext(entries);
+			expect(ctx.messages.map((message) => message.role)).toEqual(["compactionSummary", "user", "user"]);
 		});
 	});
 

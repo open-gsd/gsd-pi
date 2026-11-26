@@ -1,8 +1,8 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { SessionManager } from "../../src/core/session-manager.js";
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -11,6 +11,30 @@ describe("SessionManager.newSession with custom id", () => {
 		const session = SessionManager.inMemory();
 		session.newSession({ id: "my-custom-id" });
 		expect(session.getSessionId()).toBe("my-custom-id");
+	});
+
+	it("uses the provided id when creating an in-memory session", () => {
+		const session = SessionManager.inMemory(process.cwd(), { id: "memory-session-id" });
+		expect(session.getSessionId()).toBe("memory-session-id");
+		expect(session.getHeader()!.id).toBe("memory-session-id");
+		expect(session.getSessionFile()).toBeUndefined();
+	});
+
+	it("allows alphanumeric session ids with interior punctuation", () => {
+		const session = SessionManager.inMemory();
+		session.newSession({ id: "abc-123_def.456" });
+		expect(session.getSessionId()).toBe("abc-123_def.456");
+	});
+
+	it("rejects invalid custom session ids", () => {
+		const invalidIds = ["", "-abc", "abc-", "_abc", "abc_", ".abc", "abc.", "abc/def", "abc\\def", "abc def"];
+
+		for (const id of invalidIds) {
+			const session = SessionManager.inMemory();
+			expect(() => session.newSession({ id })).toThrow(
+				"Session id must be non-empty, contain only alphanumeric characters",
+			);
+		}
 	});
 
 	it("generates a UUIDv7 id when no id is provided", () => {
@@ -44,6 +68,18 @@ describe("SessionManager.newSession with custom id", () => {
 		const session = SessionManager.inMemory();
 		expect(session.getSessionId()).toMatch(UUID_V7_RE);
 		expect(session.getHeader()!.id).toBe(session.getSessionId());
+	});
+
+	it("uses the provided id when creating a persisted session", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
+		const session = SessionManager.create(tempDir, tempDir, { id: "created-session-id" });
+
+		expect(session.getSessionId()).toBe("created-session-id");
+		expect(session.getHeader()!.id).toBe("created-session-id");
+		const sessionFile = session.getSessionFile()!;
+		expect(sessionFile).toContain("created-session-id");
+		expect(basename(sessionFile)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_created-session-id\.jsonl$/);
+		expect(existsSync(sessionFile)).toBe(false);
 	});
 
 	it("generates a UUIDv7 id when creating a branched session", () => {
@@ -105,5 +141,72 @@ describe("SessionManager.newSession with custom id", () => {
 		expect(header).not.toBeNull();
 		expect(header!.id).toMatch(UUID_V7_RE);
 		expect(header!.parentSession).toBe(sourcePath);
+	});
+
+	it("uses the provided id when forking from another session file", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
+		const sourcePath = join(tempDir, "source.jsonl");
+		writeFileSync(
+			sourcePath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "source-session-id",
+				timestamp: new Date().toISOString(),
+				cwd: tempDir,
+			})}\n`,
+		);
+
+		const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir, { id: "forked-session-id" });
+		const header = forked.getHeader();
+		expect(header).not.toBeNull();
+		expect(header!.id).toBe("forked-session-id");
+		expect(header!.parentSession).toBe(sourcePath);
+		const sessionFile = forked.getSessionFile()!;
+		expect(sessionFile).toContain("forked-session-id");
+		expect(basename(sessionFile)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_forked-session-id\.jsonl$/);
+	});
+});
+
+describe("SessionManager.forkFrom", () => {
+	it("copies all entries unchanged into the forked session", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
+		try {
+			const sourcePath = join(tempDir, "source.jsonl");
+			const lines = [
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "source-id",
+					timestamp: new Date().toISOString(),
+					cwd: tempDir,
+				}),
+			];
+			let parentId: string | null = null;
+			for (let i = 0; i < 50; i++) {
+				const id = `e${i}`;
+				lines.push(
+					JSON.stringify({
+						type: "message",
+						id,
+						parentId,
+						timestamp: new Date().toISOString(),
+						message: { role: "user", content: `message ${i}`, timestamp: 0 },
+					}),
+				);
+				parentId = id;
+			}
+			writeFileSync(sourcePath, `${lines.join("\n")}\n`);
+
+			const forked = SessionManager.forkFrom(sourcePath, tempDir, join(tempDir, "sessions"));
+
+			const written = readFileSync(forked.getSessionFile()!, "utf8").trimEnd().split("\n");
+			expect(written).toHaveLength(51);
+			expect(JSON.parse(written[0]).parentSession).toBe(sourcePath);
+			expect(written.slice(1)).toEqual(lines.slice(1));
+			expect(forked.getEntries()).toHaveLength(50);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });

@@ -1,14 +1,13 @@
-import { setKeybindings } from "@earendil-works/pi-tui";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.ts";
-import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../src/core/provider-display-names.ts";
-import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.ts";
-import { isApiKeyLoginProvider } from "../src/modes/interactive/interactive-mode.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
-import { stripAnsi } from "../src/utils/ansi.ts";
-
-const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+import { setKeybindings, type TUI } from "@gsd/pi-tui";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.js";
+import {
+	type AuthSelectorProvider,
+	OAuthSelectorComponent,
+} from "../src/modes/interactive/components/oauth-selector.js";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
 
 describe("OAuthSelectorComponent", () => {
 	beforeAll(() => {
@@ -19,119 +18,325 @@ describe("OAuthSelectorComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	afterEach(() => {
-		if (originalOpenAiApiKey === undefined) {
-			delete process.env.OPENAI_API_KEY;
-		} else {
-			process.env.OPENAI_API_KEY = originalOpenAiApiKey;
-		}
-	});
-
-	it("keeps built-in API key providers separate from OAuth-only providers", () => {
-		const oauthProviderIds = new Set(["anthropic", "github-copilot", "custom-oauth"]);
-		const builtInProviderIds = new Set(["anthropic", "github-copilot", "amazon-bedrock", "openai"]);
-
-		expect(isApiKeyLoginProvider("anthropic", oauthProviderIds, builtInProviderIds)).toBe(true);
-		expect(BUILT_IN_PROVIDER_DISPLAY_NAMES.anthropic).toBe("Anthropic");
-		expect(isApiKeyLoginProvider("openai", oauthProviderIds, builtInProviderIds)).toBe(true);
-		expect(isApiKeyLoginProvider("github-copilot", oauthProviderIds, builtInProviderIds)).toBe(false);
-		expect(isApiKeyLoginProvider("amazon-bedrock", oauthProviderIds, builtInProviderIds)).toBe(true);
-		expect(isApiKeyLoginProvider("custom-oauth", oauthProviderIds, builtInProviderIds)).toBe(false);
-		expect(isApiKeyLoginProvider("custom-api", oauthProviderIds, builtInProviderIds)).toBe(true);
-	});
-
-	it("shows stored OAuth auth distinctly in the API key selector", () => {
-		const authStorage = AuthStorage.inMemory({
-			anthropic: {
-				type: "oauth",
-				access: "access-token",
-				refresh: "refresh-token",
-				expires: Date.now() + 60_000,
+	it("projects provider-owned auth options without provider-specific filtering", () => {
+		const getLoginProviderOptions = (
+			InteractiveMode as unknown as {
+				prototype: {
+					getLoginProviderOptions(
+						this: object,
+						authType?: "oauth" | "api_key",
+					): Array<{ id: string; name: string; authType: string; method?: { name: string; login?: unknown } }>;
+				};
+			}
+		).prototype.getLoginProviderOptions;
+		const providers = [
+			{
+				id: "anthropic",
+				name: "Anthropic",
+				auth: {
+					oauth: { name: "Anthropic (Claude Pro/Max)", login: async () => ({}) },
+					apiKey: { name: "Anthropic API key", login: async () => ({}) },
+				},
 			},
-		});
+			{
+				id: "google-vertex",
+				name: "Google Vertex AI",
+				auth: { apiKey: { name: "Google Cloud credentials" } },
+			},
+		];
+		const fakeThis = {
+			session: {
+				modelRuntime: {
+					getProviders: () => providers,
+					getProviderAuthStatus: () => ({ configured: false }),
+					isUsingOAuth: () => false,
+				},
+			},
+		};
+
+		const apiKeyOptions = getLoginProviderOptions.call(fakeThis, "api_key");
+		expect(apiKeyOptions).toMatchObject([
+			{
+				id: "anthropic",
+				name: "Anthropic",
+				authType: "api_key",
+				method: { name: "Anthropic API key" },
+			},
+			{
+				id: "google-vertex",
+				name: "Google Vertex AI",
+				authType: "api_key",
+				method: { name: "Google Cloud credentials" },
+			},
+		]);
+		expect(getLoginProviderOptions.call(fakeThis, "oauth")).toMatchObject([
+			{ id: "anthropic", name: "Anthropic", authType: "oauth" },
+		]);
+	});
+
+	it("renders an option without compiled auth status as not configured", () => {
 		const selector = new OAuthSelectorComponent(
 			"login",
-			authStorage,
-			[{ id: "anthropic", name: "Anthropic", authType: "api_key" }],
+			[{ id: "google", name: "Google", authType: "api_key", status: undefined }],
 			() => {},
 			() => {},
 		);
 
 		const output = stripAnsi(selector.render(120).join("\n"));
+		expect(output).toContain("not configured");
+		expect(output).not.toContain("✓ configured");
+	});
 
-		expect(output).toContain("Anthropic");
+	// Regression test for #12164.
+	it("shows a stored credential that does not resolve", () => {
+		const getLoginProviderOptions = (
+			InteractiveMode as unknown as {
+				prototype: {
+					getLoginProviderOptions(this: object): AuthSelectorProvider[];
+				};
+			}
+		).prototype.getLoginProviderOptions;
+		const fakeThis = {
+			session: {
+				modelRuntime: {
+					getProviders: () => [{ id: "deepseek", name: "DeepSeek", auth: { apiKey: { name: "API key" } } }],
+					getProviderAuthStatus: () => ({ configured: false, source: "stored" }),
+					isUsingOAuth: () => false,
+				},
+			},
+		};
+		const selector = new OAuthSelectorComponent(
+			"login",
+			getLoginProviderOptions.call(fakeThis),
+			() => {},
+			() => {},
+		);
+
+		const output = stripAnsi(selector.render(120).join("\n"));
+		expect(output).toContain("DeepSeek • stored key did not resolve");
+		expect(output).not.toContain("not configured");
+	});
+
+	it("shows OAuth auth distinctly in the API key selector", () => {
+		const selector = new OAuthSelectorComponent(
+			"login",
+			[
+				{
+					id: "anthropic",
+					name: "Anthropic",
+					authType: "api_key",
+					status: { kind: "configured", type: "oauth", source: "OAuth" },
+				},
+			],
+			() => {},
+			() => {},
+		);
+
+		const output = stripAnsi(selector.render(120).join("\n"));
 		expect(output).toContain("subscription configured");
 	});
 
 	it("shows environment API key auth as configured", () => {
-		process.env.OPENAI_API_KEY = "test-openai-key";
-		const authStorage = AuthStorage.inMemory();
 		const selector = new OAuthSelectorComponent(
 			"login",
-			authStorage,
-			[{ id: "openai", name: "OpenAI", authType: "api_key" }],
+			[
+				{
+					id: "openai",
+					name: "OpenAI",
+					authType: "api_key",
+					status: { kind: "configured", type: "api_key", source: "OPENAI_API_KEY" },
+				},
+			],
 			() => {},
 			() => {},
 		);
 
 		const output = stripAnsi(selector.render(120).join("\n"));
-
-		expect(output).toContain("OpenAI");
 		expect(output).toContain("✓ env: OPENAI_API_KEY");
-		expect(output).not.toContain("unconfigured");
-	});
-
-	it("shows custom provider environment API key auth from status resolver", () => {
-		const authStorage = AuthStorage.inMemory();
-		const selector = new OAuthSelectorComponent(
-			"login",
-			authStorage,
-			[{ id: "ollama", name: "ollama", authType: "api_key" }],
-			() => {},
-			() => {},
-			() => ({ configured: true, source: "environment", label: "OLLAMA_API_KEY" }),
-		);
-
-		const output = stripAnsi(selector.render(120).join("\n"));
-
-		expect(output).toContain("ollama");
-		expect(output).toContain("✓ env: OLLAMA_API_KEY");
-		expect(output).not.toContain("unconfigured");
+		expect(output).not.toContain("not configured");
 	});
 
 	it("shows models.json API key auth as configured", () => {
-		const authStorage = AuthStorage.inMemory();
 		const selector = new OAuthSelectorComponent(
 			"login",
-			authStorage,
-			[{ id: "local-proxy", name: "local-proxy", authType: "api_key" }],
+			[
+				{
+					id: "local-proxy",
+					name: "local-proxy",
+					authType: "api_key",
+					status: { kind: "configured", type: "api_key", source: "key in models.json" },
+				},
+			],
 			() => {},
 			() => {},
-			() => ({ configured: true, source: "models_json_key" }),
 		);
 
-		const output = stripAnsi(selector.render(120).join("\n"));
-
-		expect(output).toContain("local-proxy");
-		expect(output).toContain("✓ key in models.json");
-		expect(output).not.toContain("unconfigured");
+		expect(stripAnsi(selector.render(120).join("\n"))).toContain("✓ key in models.json");
 	});
 
 	it("shows models.json command auth as configured", () => {
-		const authStorage = AuthStorage.inMemory();
 		const selector = new OAuthSelectorComponent(
 			"login",
-			authStorage,
-			[{ id: "op-proxy", name: "op-proxy", authType: "api_key" }],
+			[
+				{
+					id: "op-proxy",
+					name: "op-proxy",
+					authType: "api_key",
+					status: { kind: "configured", type: "api_key", source: "command in models.json" },
+				},
+			],
 			() => {},
 			() => {},
-			() => ({ configured: true, source: "models_json_command" }),
+		);
+
+		expect(stripAnsi(selector.render(120).join("\n"))).toContain("✓ command in models.json");
+	});
+
+	it("lists preferred partners first, then the rest alphabetically", () => {
+		const getLoginProviderOptions = (
+			InteractiveMode as unknown as {
+				prototype: {
+					getLoginProviderOptions(this: object): Array<{ id: string; authType: string }>;
+				};
+			}
+		).prototype.getLoginProviderOptions;
+		const apiKey = { apiKey: { name: "API key" } };
+		const providers = [
+			{ id: "anthropic", name: "Anthropic", auth: apiKey },
+			{
+				id: "openrouter",
+				name: "OpenRouter",
+				auth: { oauth: { name: "OpenRouter", login: async () => ({}) }, ...apiKey },
+			},
+			{ id: "zai", name: "Z.AI", auth: apiKey },
+			{ id: "radius", name: "Radius", auth: { oauth: { name: "Radius", login: async () => ({}) } } },
+			{ id: "google", name: "Google", auth: apiKey },
+		];
+		const fakeThis = {
+			session: {
+				modelRuntime: {
+					getProviders: () => providers,
+					getProviderAuthStatus: () => ({ configured: false }),
+					isUsingOAuth: () => false,
+				},
+			},
+		};
+
+		expect(getLoginProviderOptions.call(fakeThis).map(({ id, authType }) => `${id}:${authType}`)).toEqual([
+			"radius:oauth",
+			"openrouter:oauth",
+			"openrouter:api_key",
+			"anthropic:api_key",
+			"google:api_key",
+			"zai:api_key",
+		]);
+	});
+
+	it("shows the brand style of a preferred partner only on its selected row", () => {
+		const tui = { requestRender: () => {} } as unknown as TUI;
+		const providers = [
+			{ id: "radius", name: "Radius", authType: "oauth" as const },
+			{ id: "openrouter", name: "OpenRouter", authType: "api_key" as const },
+		];
+		const selector = new OAuthSelectorComponent(
+			"login",
+			providers,
+			() => {},
+			() => {},
+			undefined,
+			tui,
+		);
+		try {
+			const output = selector.render(120).join("\n");
+			expect(output).not.toContain(theme.fg("accent", "Radius"));
+			expect(output).toContain(theme.fg("text", "OpenRouter"));
+			expect(stripAnsi(output)).toContain("→ Radius");
+
+			selector.handleInput("\x1b[B");
+			const moved = selector.render(120).join("\n");
+			expect(moved).toContain(theme.fg("text", "Radius"));
+			expect(moved).not.toContain(theme.fg("accent", "OpenRouter"));
+			expect(stripAnsi(moved)).toContain("→ OpenRouter");
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps the accent style without a TUI to animate in", () => {
+		const selector = new OAuthSelectorComponent(
+			"login",
+			[{ id: "openrouter", name: "OpenRouter", authType: "api_key" }],
+			() => {},
+			() => {},
+		);
+
+		expect(selector.render(120).join("\n")).toContain(theme.fg("accent", "OpenRouter"));
+	});
+
+	it("marks preferred partners with a star", () => {
+		const selector = new OAuthSelectorComponent(
+			"login",
+			[
+				{ id: "radius", name: "Radius", authType: "oauth" },
+				{ id: "openrouter", name: "OpenRouter", authType: "api_key" },
+				{ id: "anthropic", name: "Anthropic", authType: "api_key" },
+			],
+			() => {},
+			() => {},
 		);
 
 		const output = stripAnsi(selector.render(120).join("\n"));
+		expect(output).toContain("→ Radius ✦ [subscription]");
+		expect(output).toContain("  OpenRouter ✦ [API key]");
+		expect(output).toContain("  Anthropic [API key]");
+	});
 
-		expect(output).toContain("op-proxy");
-		expect(output).toContain("✓ command in models.json");
-		expect(output).not.toContain("unconfigured");
+	// Regression test for #12245.
+	it("selects the best match after typing a query, even after scrolling", () => {
+		const providers = ["Anthropic", "Google", "Groq", "Mistral", "OpenAI", "OpenCode Go", "OpenCode Zen", "xAI"].map(
+			(name) => ({ id: name.toLowerCase().replace(" ", "-"), name, authType: "api_key" as const }),
+		);
+		const selected: string[] = [];
+		const selector = new OAuthSelectorComponent(
+			"login",
+			providers,
+			(providerId) => selected.push(providerId),
+			() => {},
+		);
+
+		for (let i = 0; i < 5; i++) selector.handleInput("\x1b[B");
+		for (const char of "openai") selector.handleInput(char);
+
+		expect(stripAnsi(selector.render(120).join("\n"))).toContain("→ OpenAI");
+		selector.handleInput("\r");
+		expect(selected).toEqual(["openai"]);
+	});
+
+	it("keeps the selection when a cursor key leaves the query unchanged", () => {
+		const providers = ["OpenAI", "OpenCode Go", "OpenCode Zen"].map((name) => ({
+			id: name.toLowerCase().replace(" ", "-"),
+			name,
+			authType: "api_key" as const,
+		}));
+		const selector = new OAuthSelectorComponent(
+			"login",
+			providers,
+			() => {},
+			() => {},
+		);
+
+		for (const char of "open") selector.handleInput(char);
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\x1b[B");
+		const selectedRow = () =>
+			stripAnsi(selector.render(120).join("\n"))
+				.split("\n")
+				.find((line) => line.includes("→"));
+		const before = selectedRow();
+		selector.handleInput("\x1b[D"); // Left
+		selector.handleInput("\x1b[H"); // Home
+
+		expect(before).not.toContain("OpenAI");
+		expect(selectedRow()).toBe(before);
 	});
 });

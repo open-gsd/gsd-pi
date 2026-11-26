@@ -1,16 +1,16 @@
 /**
  * Debug script to reproduce streaming rendering issues.
  * Uses real fixture data that caused the bug.
- * Run with: npx tsx test/streaming-render-debug.ts
+ * Run with: node --import ./src/experimental/source-resolver.ts test/streaming-render-debug.ts
  */
 
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { ProcessTerminal, TUI } from "@earendil-works/pi-tui";
+import type { AssistantMessage } from "@gsd/pi-ai";
+import { ProcessTerminal, type TUI, TuiMainScreen } from "@gsd/pi-tui";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -42,7 +42,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function main() {
 	const terminal = new ProcessTerminal();
-	const tui = new TUI(terminal);
+	const tui: TUI = new TuiMainScreen(terminal);
 
 	// Start with empty message
 	const message = {

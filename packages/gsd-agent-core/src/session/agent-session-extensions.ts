@@ -1,5 +1,6 @@
 import type { Agent, AgentTool, ThinkingLevel } from "@gsd/pi-agent-core";
-import type { Model } from "@gsd/pi-ai";
+import type { Model, SimpleStreamOptions } from "@gsd/pi-ai";
+import { setAgentSystemPrompt } from "../agent-system-prompt.js";
 import { resetApiProviders } from "@gsd/pi-ai";
 import {
 	ExtensionRunner,
@@ -60,12 +61,12 @@ export class AgentSessionExtensionsModule {
 		const agent = this.host.agent;
 		if (extensionUiStreamBridgedAgents.has(agent)) return;
 
-		const baseStreamFn = agent.streamFn;
-		agent.streamFn = (model, context, options) =>
+		const baseStreamFn = agent.streamFunction;
+		agent.streamFunction = (model, context, options) =>
 			baseStreamFn(model, context, {
 				...options,
 				extensionUIContext: this.host._extensionUIContext,
-			} as typeof options);
+			} as SimpleStreamOptions);
 		extensionUiStreamBridgedAgents.add(agent);
 	}
 
@@ -169,16 +170,11 @@ export class AgentSessionExtensionsModule {
 
 		this.host.resourceLoader.extendResources(extensionPaths);
 		this.host._baseSystemPrompt = this.rebuildSystemPrompt(this.host.getActiveToolNames());
-		this.host.agent.state.systemPrompt = this.host._baseSystemPrompt;
+		setAgentSystemPrompt(this.host.agent, this.host._baseSystemPrompt);
 	}
 
 	async emitSessionStartWithLegacySwitch(event: SessionStartEvent & { reason: "new" | "resume" }): Promise<void> {
 		await this.host._extensionRunner.emit(event);
-		await this.host._extensionRunner.emit({
-			type: "session_switch",
-			reason: event.reason,
-			previousSessionFile: event.previousSessionFile,
-		});
 	}
 
 	buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
@@ -296,27 +292,19 @@ export class AgentSessionExtensionsModule {
 				setActiveTools: (toolNames) => this.host.setActiveToolsByName(toolNames),
 				refreshTools: () => this.refreshToolRegistry(),
 				getCommands,
-				setModel: async (model, options) => {
+				getSettings: () => this.host.settingsManager.getSettings(),
+				setModel: async (model) => {
 					if (!this.host.modelRegistry.hasConfiguredAuth(model)) return false;
-					await this.host.setModel(model, options);
+					await this.host.setModel(model);
 					return true;
 				},
 				getThinkingLevel: () => this.host.thinkingLevel,
-				setThinkingLevel: (level, options) => this.host.setThinkingLevel(level, options),
-				retryLastTurn: () => {
-					void this.host.agent.continue();
-				},
-				getVisibleSkills: () => this.host._visibleSkillNames,
-				setVisibleSkills: (skillNames) => {
-					this.host._visibleSkillNames = skillNames;
-					this.refreshSystemPromptForVisibleSkills();
-				},
-				emitBeforeModelSelect: (event) => this.host._extensionRunner.emitBeforeModelSelect(event),
-				emitAdjustToolSet: (event) => this.host._extensionRunner.emitAdjustToolSet(event),
-				emitExtensionEvent: (event) => this.host._extensionRunner.emitExtensionEventDynamic(event),
+				setThinkingLevel: (level) => this.host.setThinkingLevel(level),
 			},
 			{
 				getModel: () => this.host.model,
+				getScopedModels: () => this.host._scopedModels,
+				isProjectTrusted: () => this.host.settingsManager.isProjectTrusted(),
 				isIdle: () => !this.host.isStreaming,
 				getSignal: () => this.host.agent.signal,
 				abort: () => {
@@ -343,9 +331,6 @@ export class AgentSessionExtensionsModule {
 					})();
 				},
 				getSystemPrompt: () => this.host.systemPrompt,
-				setCompactionThresholdOverride: (percent) => {
-					this.host.settingsManager.setCompactionThresholdOverride(percent);
-				},
 			},
 			{
 				registerProvider: (name, config) => {
@@ -699,7 +684,7 @@ export class AgentSessionExtensionsModule {
 	private refreshSystemPromptForVisibleSkills(): void {
 		const toolNames = this.getActiveToolNames();
 		this.host._baseSystemPrompt = this.rebuildSystemPrompt(toolNames);
-		this.host.agent.state.systemPrompt = this.host._baseSystemPrompt;
+		setAgentSystemPrompt(this.host.agent, this.host._baseSystemPrompt);
 	}
 
 	getActiveToolNames(): string[] {
@@ -711,6 +696,7 @@ export class AgentSessionExtensionsModule {
 			name: definition.name,
 			description: definition.description,
 			parameters: definition.parameters,
+			exposure: definition.exposure ?? "direct",
 			sourceInfo,
 		}));
 	}
@@ -733,7 +719,7 @@ export class AgentSessionExtensionsModule {
 
 		// Rebuild base system prompt with new tool set
 		this.host._baseSystemPrompt = this.rebuildSystemPrompt(validToolNames);
-		this.host.agent.state.systemPrompt = this.host._baseSystemPrompt;
+		setAgentSystemPrompt(this.host.agent, this.host._baseSystemPrompt);
 	}
 
 	createReplacedSessionContext(): ReplacedSessionContext {

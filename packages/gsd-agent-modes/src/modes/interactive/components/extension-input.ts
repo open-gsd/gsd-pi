@@ -66,7 +66,7 @@ export class ExtensionInputComponent extends DialogContainer implements Focusabl
 		this.input = new Input();
 		this.input.secure = opts?.secure === true;
 		if (placeholder) {
-			this.input.placeholder = placeholder;
+			this.input.setPlaceholder(placeholder);
 		}
 		this.addChild(this.input);
 		this.addChild(new Spacer(1));

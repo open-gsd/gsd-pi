@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { findEnvKeys, getApiKeyEnvVars, getEnvApiKey } from "../src/env-api-keys.ts";
+import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.js";
 
 const originalCopilotGitHubToken = process.env.COPILOT_GITHUB_TOKEN;
 const originalGhToken = process.env.GH_TOKEN;
 const originalGitHubToken = process.env.GITHUB_TOKEN;
-const originalAnthropicVertexProjectId = process.env.ANTHROPIC_VERTEX_PROJECT_ID;
-const originalCursorApiKey = process.env.CURSOR_API_KEY;
-const originalGoogleCloudProject = process.env.GOOGLE_CLOUD_PROJECT;
-const originalGcloudProject = process.env.GCLOUD_PROJECT;
+const originalZaiCodingCnApiKey = process.env.ZAI_CODING_CN_API_KEY;
+const originalAnthropicAuthToken = process.env.ANTHROPIC_AUTH_TOKEN;
+const originalAnthropicOauthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+const originalAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
 
 afterEach(() => {
 	if (originalCopilotGitHubToken === undefined) {
@@ -28,28 +28,28 @@ afterEach(() => {
 		process.env.GITHUB_TOKEN = originalGitHubToken;
 	}
 
-	if (originalAnthropicVertexProjectId === undefined) {
-		delete process.env.ANTHROPIC_VERTEX_PROJECT_ID;
+	if (originalZaiCodingCnApiKey === undefined) {
+		delete process.env.ZAI_CODING_CN_API_KEY;
 	} else {
-		process.env.ANTHROPIC_VERTEX_PROJECT_ID = originalAnthropicVertexProjectId;
+		process.env.ZAI_CODING_CN_API_KEY = originalZaiCodingCnApiKey;
 	}
 
-	if (originalCursorApiKey === undefined) {
-		delete process.env.CURSOR_API_KEY;
+	if (originalAnthropicAuthToken === undefined) {
+		delete process.env.ANTHROPIC_AUTH_TOKEN;
 	} else {
-		process.env.CURSOR_API_KEY = originalCursorApiKey;
+		process.env.ANTHROPIC_AUTH_TOKEN = originalAnthropicAuthToken;
 	}
 
-	if (originalGoogleCloudProject === undefined) {
-		delete process.env.GOOGLE_CLOUD_PROJECT;
+	if (originalAnthropicOauthToken === undefined) {
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
 	} else {
-		process.env.GOOGLE_CLOUD_PROJECT = originalGoogleCloudProject;
+		process.env.ANTHROPIC_OAUTH_TOKEN = originalAnthropicOauthToken;
 	}
 
-	if (originalGcloudProject === undefined) {
-		delete process.env.GCLOUD_PROJECT;
+	if (originalAnthropicApiKey === undefined) {
+		delete process.env.ANTHROPIC_API_KEY;
 	} else {
-		process.env.GCLOUD_PROJECT = originalGcloudProject;
+		process.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
 	}
 });
 
@@ -72,21 +72,45 @@ describe("environment API keys", () => {
 		expect(getEnvApiKey("github-copilot")).toBe("copilot-token");
 	});
 
-	it("resolves Cursor Agent credentials from CURSOR_API_KEY", () => {
-		process.env.CURSOR_API_KEY = "cursor-token";
+	it("resolves ZAI China Coding Plan credentials from ZAI_CODING_CN_API_KEY", () => {
+		process.env.ZAI_CODING_CN_API_KEY = "zai-coding-cn-token";
 
-		expect(getApiKeyEnvVars("cursor-agent")).toEqual(["CURSOR_API_KEY"]);
-		expect(findEnvKeys("cursor-agent")).toEqual(["CURSOR_API_KEY"]);
-		expect(getEnvApiKey("cursor-agent")).toBe("cursor-token");
+		expect(findEnvKeys("zai-coding-cn")).toEqual(["ZAI_CODING_CN_API_KEY"]);
+		expect(getEnvApiKey("zai-coding-cn")).toBe("zai-coding-cn-token");
 	});
 
-	it("treats ANTHROPIC_VERTEX_PROJECT_ID as Anthropic Vertex auth", () => {
-		process.env.ANTHROPIC_VERTEX_PROJECT_ID = "vertex-project";
-		delete process.env.GOOGLE_CLOUD_PROJECT;
-		delete process.env.GCLOUD_PROJECT;
+	it("reports ANTHROPIC_AUTH_TOKEN but preserves OAuth token API key lookup", () => {
+		process.env.ANTHROPIC_AUTH_TOKEN = "auth-token";
+		process.env.ANTHROPIC_OAUTH_TOKEN = "oauth-token";
+		process.env.ANTHROPIC_API_KEY = "api-key";
 
-		expect(getApiKeyEnvVars("anthropic-vertex")).toEqual(["ANTHROPIC_VERTEX_PROJECT_ID"]);
-		expect(findEnvKeys("anthropic-vertex")).toEqual(["ANTHROPIC_VERTEX_PROJECT_ID"]);
-		expect(getEnvApiKey("anthropic-vertex")).toBe("<authenticated>");
+		expect(findEnvKeys("anthropic")).toEqual(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
+		expect(getEnvApiKey("anthropic")).toBe("oauth-token");
+	});
+
+	it("does not return ANTHROPIC_AUTH_TOKEN as an API key", () => {
+		process.env.ANTHROPIC_AUTH_TOKEN = "auth-token";
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		delete process.env.ANTHROPIC_API_KEY;
+
+		expect(findEnvKeys("anthropic")).toEqual(["ANTHROPIC_AUTH_TOKEN"]);
+		expect(getEnvApiKey("anthropic")).toBeUndefined();
+	});
+
+	it("preserves ANTHROPIC_OAUTH_TOKEN as an API key", () => {
+		delete process.env.ANTHROPIC_AUTH_TOKEN;
+		process.env.ANTHROPIC_OAUTH_TOKEN = "oauth-token";
+		delete process.env.ANTHROPIC_API_KEY;
+
+		expect(findEnvKeys("anthropic")).toEqual(["ANTHROPIC_OAUTH_TOKEN"]);
+		expect(getEnvApiKey("anthropic")).toBe("oauth-token");
+	});
+
+	it("falls back to ANTHROPIC_API_KEY for API key lookup", () => {
+		delete process.env.ANTHROPIC_AUTH_TOKEN;
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		process.env.ANTHROPIC_API_KEY = "api-key";
+
+		expect(getEnvApiKey("anthropic")).toBe("api-key");
 	});
 });

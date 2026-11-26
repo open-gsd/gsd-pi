@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assistantMsg, userMsg } from "../../utilities.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import { assistantMsg, userMsg } from "../../utilities.js";
+import { createHarness, type Harness } from "../harness.js";
 
 describe("issue #3688 tree cancellation compaction state", () => {
 	const harnesses: Harness[] = [];

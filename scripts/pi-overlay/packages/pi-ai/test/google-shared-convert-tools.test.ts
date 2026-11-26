@@ -1,33 +1,66 @@
+import type { GenerateContentParameters } from "@google/genai";
 import { describe, expect, it } from "vitest";
-import { convertMessages, convertTools } from "../src/providers/google-shared.ts";
-import type { Context, Model, Tool } from "../src/types.ts";
+import { streamSimple as streamSimpleGoogle } from "../src/api/google-generative-ai.ts";
+import {
+	convertTools,
+	resolveGoogleFunctionCallingMode,
+	supportsGoogleStrictToolSampling,
+} from "../src/api/google-shared.ts";
+import { streamSimple as streamSimpleVertex } from "../src/api/google-vertex.ts";
+import type { GoogleCompat, Model, Tool } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
+
+function googleModel(id: string, compat?: GoogleCompat): Model<"google-generative-ai"> {
+	return {
+		id,
+		name: id,
+		api: "google-generative-ai",
+		provider: "test-google",
+		baseUrl: "https://example.invalid/v1beta",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 4096,
+		...(compat && { compat }),
+	};
+}
+
+function vertexModel(id: string, compat?: GoogleCompat): Model<"google-vertex"> {
+	return {
+		...googleModel(id, compat),
+		api: "google-vertex",
+		provider: "test-vertex",
+		baseUrl: "https://example.invalid/v1",
+	};
+}
+
+/** Builds the request for one strict-preferring tool and returns its function-calling mode. */
+async function capturedFunctionCallingMode(
+	model: Model<"google-generative-ai"> | Model<"google-vertex">,
+): Promise<string | undefined> {
+	const tool = makeTool({ type: "object", properties: {} });
+	tool.constrainedSampling = { type: "json_schema", strict: "prefer" };
+	const context = normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 0 }], tools: [tool] });
+	let payload: GenerateContentParameters | undefined;
+	const onPayload = (request: unknown) => {
+		payload = request as GenerateContentParameters;
+		throw new Error("payload captured");
+	};
+	const stream =
+		model.api === "google-vertex"
+			? streamSimpleVertex(model as Model<"google-vertex">, context, { apiKey: "test", onPayload })
+			: streamSimpleGoogle(model as Model<"google-generative-ai">, context, { apiKey: "test", onPayload });
+	const result = await stream.result();
+	expect(result.errorMessage).toContain("payload captured");
+	return payload?.config?.toolConfig?.functionCallingConfig?.mode;
+}
 
 function makeTool(parameters: Record<string, unknown>): Tool {
 	return {
 		name: "test_tool",
 		description: "A test tool",
 		parameters: parameters as Tool["parameters"],
-	};
-}
-
-function makeGoogleModel(overrides: Partial<Model<"google-generative-ai">>): Model<"google-generative-ai"> {
-	return {
-		id: "gemini-3-pro",
-		name: "Test model",
-		api: "google-generative-ai",
-		provider: "google",
-		baseUrl: "",
-		reasoning: false,
-		input: ["text", "image"],
-		cost: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-		},
-		contextWindow: 1024,
-		maxTokens: 1024,
-		...overrides,
 	};
 }
 
@@ -99,7 +132,7 @@ describe("google-shared convertTools", () => {
 		});
 	});
 
-	it("strips unsupported $ref keys from Claude parameters", () => {
+	it("preserves $ref while stripping meta keys", () => {
 		const tools = [
 			makeTool({
 				$schema: "http://json-schema.org/draft-07/schema#",
@@ -121,6 +154,7 @@ describe("google-shared convertTools", () => {
 			type: "object",
 			properties: {
 				refProp: {
+					$ref: "#/$defs/someDef",
 					type: "string",
 				},
 			},
@@ -150,7 +184,7 @@ describe("google-shared convertTools", () => {
 		});
 	});
 
-	it("strips $schema from parametersJsonSchema when useParameters=false", () => {
+	it("preserves $schema in parametersJsonSchema when useParameters=false", () => {
 		const tools = [
 			makeTool({
 				$schema: "http://json-schema.org/draft-07/schema#",
@@ -167,13 +201,13 @@ describe("google-shared convertTools", () => {
 
 		expect(decl).toBeDefined();
 		expect(decl?.parametersJsonSchema).toEqual({
+			$schema: "http://json-schema.org/draft-07/schema#",
 			type: "object",
 			properties: {
 				command: { type: "string" },
 			},
 			required: ["command"],
 		});
-		expect(decl?.parametersJsonSchema).not.toHaveProperty("$schema");
 	});
 
 	it("handles tools without $schema gracefully", () => {
@@ -200,351 +234,172 @@ describe("google-shared convertTools", () => {
 		});
 	});
 
+	it("uses validated function calling for strict tools on Gemini 3", () => {
+		const tool = makeTool({ type: "object", properties: {} });
+		tool.constrainedSampling = { type: "json_schema", strict: "require" };
+
+		expect(supportsGoogleStrictToolSampling(googleModel("gemini-3.1-pro-preview"))).toBe(true);
+		expect(supportsGoogleStrictToolSampling(googleModel("gemini-2.5-pro"))).toBe(false);
+		expect(resolveGoogleFunctionCallingMode([tool], undefined, true)).toBe("VALIDATED");
+		expect(() => resolveGoogleFunctionCallingMode([tool], undefined, false)).toThrow(
+			'Tool "test_tool" requires JSON-schema constrained sampling',
+		);
+	});
+
+	// #12321
+	it("detects prefixed Gemini 3+ IDs and lets compat.supportsStrictMode override the detection", () => {
+		expect(supportsGoogleStrictToolSampling(googleModel("randomprefix-gemini-4-argon"))).toBe(true);
+		expect(supportsGoogleStrictToolSampling(googleModel("vendor-gemini-2.5-pro"))).toBe(false);
+		expect(supportsGoogleStrictToolSampling(googleModel("argon-latest"))).toBe(false);
+		expect(supportsGoogleStrictToolSampling(googleModel("argon-latest", { supportsStrictMode: true }))).toBe(true);
+		expect(
+			supportsGoogleStrictToolSampling(googleModel("gemini-3.1-pro-preview", { supportsStrictMode: false })),
+		).toBe(false);
+	});
+
+	// #12321
+	it("sends VALIDATED for prefixed Gemini 3+ IDs and for compat.supportsStrictMode", async () => {
+		for (const makeModel of [googleModel, vertexModel]) {
+			expect(await capturedFunctionCallingMode(makeModel("randomprefix-gemini-4-argon"))).toBe("VALIDATED");
+			expect(await capturedFunctionCallingMode(makeModel("argon-latest"))).toBeUndefined();
+			expect(await capturedFunctionCallingMode(makeModel("argon-latest", { supportsStrictMode: true }))).toBe(
+				"VALIDATED",
+			);
+		}
+	});
+
 	it("returns undefined for empty tool list", () => {
 		expect(convertTools([])).toBeUndefined();
 		expect(convertTools([], true)).toBeUndefined();
 	});
-
-	it("collapses anyOf const literals to enum for OpenAPI parameters", () => {
-		const tools = [
-			makeTool({
-				type: "object",
-				properties: {
-					runtime: {
-						anyOf: [
-							{ const: "bash", type: "string" },
-							{ const: "node", type: "string" },
-							{ const: "python", type: "string" },
-						],
-						description: "Interpreter: bash (-c), node (-e), or python3 (-c).",
-					},
-				},
-				required: ["runtime"],
-			}),
-		];
-
-		const result = convertTools(tools, true);
-		const decl = result?.[0]?.functionDeclarations?.[0];
-
-		expect(decl?.parameters).toEqual({
-			type: "object",
-			properties: {
-				runtime: {
-					type: "string",
-					enum: ["bash", "node", "python"],
-				},
-			},
-			required: ["runtime"],
-		});
-		expect(JSON.stringify(decl?.parameters)).not.toContain('"const"');
-	});
-
-	it("collapses oneOf const literals to enum for OpenAPI parameters", () => {
-		const tools = [
-			makeTool({
-				type: "object",
-				properties: {
-					mode: {
-						oneOf: [{ const: "build" }, { const: "query" }],
-						description: "build = recompute graph, query = inspect edges",
-					},
-				},
-				required: ["mode"],
-			}),
-		];
-
-		const result = convertTools(tools, true);
-		const runtime = (result?.[0]?.functionDeclarations?.[0]?.parameters as Record<string, unknown>)
-			?.properties as Record<string, unknown>;
-		expect(runtime?.mode).toEqual({
-			type: "string",
-			enum: ["build", "query"],
-		});
-	});
-
-	it("converts TypeBox Record patternProperties to additionalProperties", () => {
-		const tools = [
-			makeTool({
-				type: "object",
-				properties: {
-					values: {
-						type: "object",
-						patternProperties: {
-							"^(.*)$": { type: "string" },
-						},
-					},
-				},
-				required: ["values"],
-			}),
-		];
-
-		const result = convertTools(tools, true);
-		const decl = result?.[0]?.functionDeclarations?.[0];
-
-		expect(decl?.parameters).toEqual({
-			type: "object",
-			properties: {
-				values: {
-					type: "object",
-					additionalProperties: { type: "string" },
-				},
-			},
-			required: ["values"],
-		});
-		expect(JSON.stringify(decl?.parameters)).not.toContain("patternProperties");
-	});
-
-	it("strips patternProperties from parametersJsonSchema when useParameters=false", () => {
-		const tools = [
-			makeTool({
-				type: "object",
-				properties: {
-					metadata: {
-						type: "object",
-						patternProperties: {
-							"^(.*)$": {},
-						},
-					},
-				},
-			}),
-		];
-
-		const result = convertTools(tools, false);
-		const schema = result?.[0]?.functionDeclarations?.[0]?.parametersJsonSchema as Record<string, unknown>;
-		const metadata = (schema?.properties as Record<string, unknown>)?.metadata as Record<string, unknown>;
-
-		expect(metadata).toEqual({
-			type: "object",
-			additionalProperties: {},
-		});
-		expect(JSON.stringify(schema)).not.toContain("patternProperties");
-	});
-
-	it("merges top-level anyOf object variants for Claude parameters", () => {
-		const tools = [
-			makeTool({
-				anyOf: [
-					{
-						type: "object",
-						properties: {
-							kind: { const: "milestone" },
-							content: { type: "string" },
-						},
-						required: ["kind", "content"],
-					},
-					{
-						type: "object",
-						properties: {
-							kind: { const: "project" },
-							content: { type: "string" },
-						},
-						required: ["kind", "content"],
-					},
-				],
-			}),
-		];
-
-		const result = convertTools(tools, true);
-		expect(result?.[0]?.functionDeclarations?.[0]?.parameters).toEqual({
-			type: "object",
-			properties: {
-				kind: { type: "string", enum: ["milestone", "project"] },
-				content: { type: "string" },
-			},
-			required: ["kind", "content"],
-		});
-	});
-
-	it("simplifies heterogeneous anyOf unions for Claude parameters", () => {
-		const tools = [
-			makeTool({
-				type: "object",
-				properties: {
-					keyFiles: {
-						anyOf: [{ type: "array", items: { type: "string" } }, { type: "string" }],
-						description: "Key files created or modified",
-					},
-					verificationEvidence: {
-						type: "array",
-						items: {
-							anyOf: [
-								{
-									type: "object",
-									properties: {
-										command: { type: "string" },
-										exitCode: { type: "number" },
-									},
-									required: ["command", "exitCode"],
-								},
-								{ type: "string" },
-							],
-						},
-					},
-				},
-			}),
-		];
-
-		const result = convertTools(tools, true);
-		const parameters = result?.[0]?.functionDeclarations?.[0]?.parameters as Record<string, unknown>;
-		const properties = parameters?.properties as Record<string, unknown>;
-
-		expect(JSON.stringify(parameters)).not.toMatch(/\b(anyOf|oneOf|allOf|patternProperties|\$ref)\b/);
-		expect(properties?.keyFiles).toEqual({
-			type: "array",
-			items: { type: "string" },
-		});
-		expect(properties?.verificationEvidence).toEqual({
-			type: "array",
-			items: {
-				type: "object",
-				properties: {
-					command: { type: "string" },
-					exitCode: { type: "number" },
-				},
-				required: ["command", "exitCode"],
-			},
-		});
-	});
-
-	it("converts empty additionalProperties objects to true for Claude parameters", () => {
-		const tools = [
-			makeTool({
-				type: "object",
-				properties: {
-					metadata: {
-						type: "object",
-						patternProperties: {
-							"^(.*)$": {},
-						},
-					},
-				},
-			}),
-		];
-
-		const result = convertTools(tools, true);
-		const metadata = (
-			(result?.[0]?.functionDeclarations?.[0]?.parameters as Record<string, unknown>)?.properties as Record<
-				string,
-				unknown
-			>
-		)?.metadata;
-
-		expect(metadata).toEqual({
-			type: "object",
-			additionalProperties: true,
-		});
-	});
 });
 
-describe("google-shared convertMessages", () => {
-	it("adds the Gemini 3 unsigned function call thought-signature sentinel", () => {
-		const model = makeGoogleModel({
-			id: "gemini-3-pro",
-		});
-		const context: Context = {
-			messages: [
-				{
-					role: "assistant",
-					content: [
-						{
-							type: "toolCall",
-							id: "call-1",
-							name: "read_file",
-							arguments: { path: "README.md" },
-						},
-					],
-					api: "anthropic-messages",
-					provider: "google-antigravity",
-					model: "claude-sonnet-4-5",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "toolUse",
-					timestamp: 0,
+// Regression coverage for #11308.
+describe("google-shared convertTools const handling", () => {
+	it.each(["default", "examples", "enum", "const", "x-custom"])("preserves literal data under %s", (key) => {
+		const literal = { const: "literal-data", properties: { nested: { const: 1 } } };
+		const parameters = {
+			type: "object",
+			properties: { value: { type: "object", [key]: key === "enum" || key === "examples" ? [literal] : literal } },
+		};
+		const original = structuredClone(parameters);
+
+		expect(convertTools([makeTool(parameters)])?.[0]?.functionDeclarations?.[0]?.parametersJsonSchema).toEqual(
+			original,
+		);
+		expect(parameters).toEqual(original);
+	});
+
+	it.each(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"])(
+		"preserves names while rewriting schemas in %s",
+		(key) => {
+			const parameters = {
+				type: "object",
+				[key]: {
+					["__proto__"]: { const: "x" },
+					const: { const: "y" },
+					properties: { const: "z" },
 				},
-			],
+			};
+			const original = structuredClone(parameters);
+			const expected = {
+				type: "object",
+				[key]: {
+					["__proto__"]: { enum: ["x"] },
+					const: { enum: ["y"] },
+					properties: { enum: ["z"] },
+				},
+			};
+
+			const result = convertTools([makeTool(parameters)])?.[0]?.functionDeclarations?.[0]?.parametersJsonSchema;
+			expect(result).toEqual(expected);
+			expect(JSON.stringify(result)).toBe(JSON.stringify(expected));
+			expect(parameters).toEqual(original);
+		},
+	);
+
+	it("rewrites only schema-bearing keywords", () => {
+		const parameters = {
+			type: "object",
+			additionalProperties: { const: "x" },
+			unevaluatedProperties: false,
+			propertyNames: { const: "name" },
+			// biome-ignore lint/suspicious/noThenProperty: JSON Schema conditional keyword, not a thenable.
+			allOf: [{ if: { const: "x" }, then: { const: "y" }, else: { not: { const: "z" } } }],
+			properties: {
+				list: {
+					type: "array",
+					items: [{ const: 1 }],
+					prefixItems: [{ const: 2 }],
+					additionalItems: { const: 3 },
+					contains: { const: 4 },
+					unevaluatedItems: { const: 5 },
+				},
+			},
+			dependencies: { list: ["other"] },
 		};
 
-		const contents = convertMessages(model, context);
-
-		expect(contents[0]?.parts?.[0]).toMatchObject({
-			functionCall: {
-				name: "read_file",
-				args: { path: "README.md" },
+		expect(convertTools([makeTool(parameters)])?.[0]?.functionDeclarations?.[0]?.parametersJsonSchema).toEqual({
+			type: "object",
+			additionalProperties: { enum: ["x"] },
+			unevaluatedProperties: false,
+			propertyNames: { enum: ["name"] },
+			// biome-ignore lint/suspicious/noThenProperty: JSON Schema conditional keyword, not a thenable.
+			allOf: [{ if: { enum: ["x"] }, then: { enum: ["y"] }, else: { not: { enum: ["z"] } } }],
+			properties: {
+				list: {
+					type: "array",
+					items: [{ enum: [1] }],
+					prefixItems: [{ enum: [2] }],
+					additionalItems: { enum: [3] },
+					contains: { enum: [4] },
+					unevaluatedItems: { enum: [5] },
+				},
 			},
-			thoughtSignature: "skip_thought_signature_validator",
+			dependencies: { list: ["other"] },
 		});
 	});
 
-	it("keeps tool result images outside functionResponse for non-Gemini models", () => {
-		const model = makeGoogleModel({
-			id: "claude-sonnet-4-5",
-			provider: "google-antigravity",
-		});
-		const context: Context = {
-			messages: [
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "screenshot",
-					content: [
-						{ type: "text", text: "captured" },
-						{ type: "image", mimeType: "image/png", data: "abc123" },
+	it("rewrites string and number const values to single-value enums in parametersJsonSchema", () => {
+		const parameters = {
+			type: "object",
+			properties: {
+				origin: { type: "string", const: "zq-src-7" },
+				mode: {
+					anyOf: [
+						{ type: "string", const: "a" },
+						{ type: "string", const: "b" },
 					],
-					isError: false,
-					timestamp: 0,
 				},
-			],
-		};
-
-		const contents = convertMessages(model, context);
-
-		expect(contents).toHaveLength(2);
-		expect(contents[0]?.parts?.[0]?.functionResponse).toMatchObject({
-			name: "screenshot",
-			response: { output: "captured" },
-			id: "call-1",
-		});
-		expect(contents[0]?.parts?.[0]?.functionResponse).not.toHaveProperty("parts");
-		expect(contents[1]?.parts).toEqual([
-			{ text: "Tool result image:" },
-			{ inlineData: { mimeType: "image/png", data: "abc123" } },
-		]);
-	});
-
-	it("replaces user image parts with placeholders for text-only models", () => {
-		const model = makeGoogleModel({
-			id: "text-only-model",
-			input: ["text"],
-		});
-		const context: Context = {
-			messages: [
-				{
-					role: "user",
-					content: [
-						{ type: "text", text: "describe this" },
-						{ type: "image", mimeType: "image/png", data: "abc123" },
-					],
-					timestamp: 0,
-				},
-			],
-		};
-
-		const contents = convertMessages(model, context);
-
-		expect(contents).toEqual([
-			{
-				role: "user",
-				parts: [
-					{ text: "describe this" },
-					{ text: "(image omitted: model does not support images)" },
-				],
+				level: { oneOf: [{ const: 1 }, { const: 2 }] },
+				flag: { type: "boolean", const: true },
+				list: { type: "array", items: { const: "x" } },
+				const: { type: "string" },
 			},
-		]);
+			required: ["origin"],
+		};
+		const tools = [makeTool(parameters)];
+
+		const result = convertTools(tools);
+		const decl = result?.[0]?.functionDeclarations?.[0];
+
+		expect(decl?.parametersJsonSchema).toEqual({
+			type: "object",
+			properties: {
+				origin: { type: "string", enum: ["zq-src-7"] },
+				mode: {
+					anyOf: [
+						{ type: "string", enum: ["a"] },
+						{ type: "string", enum: ["b"] },
+					],
+				},
+				level: { oneOf: [{ enum: [1] }, { enum: [2] }] },
+				flag: { type: "boolean", const: true },
+				list: { type: "array", items: { enum: ["x"] } },
+				const: { type: "string" },
+			},
+			required: ["origin"],
+		});
+		expect(parameters.properties.origin).toEqual({ type: "string", const: "zq-src-7" });
 	});
 });

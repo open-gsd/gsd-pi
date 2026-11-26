@@ -1,9 +1,8 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { stream } from "../src/stream.ts";
-import type { Context, Tool } from "../src/types.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { getModel, stream } from "../src/compat.js";
+import type { Context, Tool } from "../src/types.js";
+import { resolveApiKey } from "./oauth.js";
 
 const oauthToken = await resolveApiKey("anthropic");
 
@@ -54,7 +53,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 
 		for await (const event of s) {
 			if (event.type === "toolcall_end") {
-				const toolCall = event.toolCall;
+				const toolCall = event.partial.content[event.contentIndex];
 				if (toolCall.type === "toolCall") {
 					toolCallName = toolCall.name;
 				}
@@ -95,7 +94,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 
 		for await (const event of s) {
 			if (event.type === "toolcall_end") {
-				const toolCall = event.toolCall;
+				const toolCall = event.partial.content[event.contentIndex];
 				if (toolCall.type === "toolCall") {
 					toolCallName = toolCall.name;
 				}
@@ -138,7 +137,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 
 		for await (const event of s) {
 			if (event.type === "toolcall_end") {
-				const toolCall = event.toolCall;
+				const toolCall = event.partial.content[event.contentIndex];
 				if (toolCall.type === "toolCall") {
 					toolCallName = toolCall.name;
 				}
@@ -189,7 +188,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 
 		for await (const event of s) {
 			if (event.type === "toolcall_end") {
-				const toolCall = event.toolCall;
+				const toolCall = event.partial.content[event.contentIndex];
 				if (toolCall.type === "toolCall") {
 					toolCallName = toolCall.name;
 				}

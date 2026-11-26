@@ -1,7 +1,5 @@
-import type { Agent as HttpAgent } from "node:http";
-import type { Agent as HttpsAgent } from "node:https";
-import { HttpProxyAgent } from "http-proxy-agent";
-import { HttpsProxyAgent } from "https-proxy-agent";
+import type { ProviderEnv } from "../types.js";
+import { getProviderEnvValue } from "./provider-env.js";
 
 const DEFAULT_PROXY_PORTS: Record<string, number> = {
 	ftp: 21,
@@ -12,16 +10,16 @@ const DEFAULT_PROXY_PORTS: Record<string, number> = {
 	wss: 443,
 };
 
-export interface NodeHttpProxyAgents {
-	httpAgent: HttpAgent;
-	httpsAgent: HttpsAgent;
-}
-
-export const UNSUPPORTED_PROXY_PROTOCOL_MESSAGE =
-	"Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; use an HTTP or HTTPS proxy URL.";
-
-function getProxyEnv(key: string): string {
-	return process.env[key.toLowerCase()] || process.env[key.toUpperCase()] || "";
+function getProxyEnv(key: string, env?: ProviderEnv): string {
+	const lowercaseKey = key.toLowerCase();
+	const uppercaseKey = key.toUpperCase();
+	return (
+		env?.[lowercaseKey] ||
+		env?.[uppercaseKey] ||
+		getProviderEnvValue(lowercaseKey) ||
+		getProviderEnvValue(uppercaseKey) ||
+		""
+	);
 }
 
 function parseProxyTargetUrl(targetUrl: string | URL): URL | undefined {
@@ -36,8 +34,45 @@ function parseProxyTargetUrl(targetUrl: string | URL): URL | undefined {
 	}
 }
 
-function shouldProxyHostname(hostname: string, port: number): boolean {
-	const noProxy = getProxyEnv("no_proxy").toLowerCase();
+function stripBrackets(host: string): string {
+	return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+}
+
+function parseNoProxyEntry(entry: string): { host: string; port: number } | undefined {
+	const trimmed = entry.trim().toLowerCase();
+	if (!trimmed) return undefined;
+
+	if (trimmed.startsWith("[")) {
+		const closingBracket = trimmed.indexOf("]");
+		if (closingBracket !== -1) {
+			const host = trimmed.slice(1, closingBracket);
+			const rest = trimmed.slice(closingBracket + 1);
+			if (rest.startsWith(":")) {
+				const port = Number.parseInt(rest.slice(1), 10);
+				return { host, port: Number.isNaN(port) ? 0 : port };
+			}
+			return { host, port: 0 };
+		}
+	}
+
+	if (trimmed.includes(":") && trimmed.split(":").length > 2) {
+		return { host: trimmed, port: 0 };
+	}
+
+	const colonIndex = trimmed.lastIndexOf(":");
+	if (colonIndex !== -1 && colonIndex === trimmed.indexOf(":")) {
+		const host = trimmed.slice(0, colonIndex);
+		const port = Number.parseInt(trimmed.slice(colonIndex + 1), 10);
+		if (!Number.isNaN(port)) {
+			return { host, port };
+		}
+	}
+
+	return { host: trimmed, port: 0 };
+}
+
+function shouldProxyHostname(hostname: string, port: number, env?: ProviderEnv): boolean {
+	const noProxy = getProxyEnv("no_proxy", env).toLowerCase();
 	if (!noProxy) {
 		return true;
 	}
@@ -45,51 +80,66 @@ function shouldProxyHostname(hostname: string, port: number): boolean {
 		return false;
 	}
 
-	return noProxy.split(/[,\s]/).every((proxy) => {
-		if (!proxy) {
+	const normalizedTargetHost = stripBrackets(hostname.toLowerCase());
+
+	return noProxy.split(/[,\s]/).every((entry) => {
+		const parsed = parseNoProxyEntry(entry);
+		if (!parsed) {
 			return true;
 		}
 
-		const parsedProxy = proxy.match(/^(.+):(\d+)$/);
-		let proxyHostname = parsedProxy ? parsedProxy[1] : proxy;
-		const proxyPort = parsedProxy ? Number.parseInt(parsedProxy[2]!, 10) : 0;
-		if (proxyPort && proxyPort !== port) {
+		if (parsed.port && parsed.port !== port) {
 			return true;
 		}
 
-		if (!/^[.*]/.test(proxyHostname)) {
-			return hostname !== proxyHostname;
+		let domain = stripBrackets(parsed.host);
+		if (domain.startsWith("*.")) {
+			domain = domain.slice(2);
+		} else if (domain.startsWith(".") || domain.startsWith("*")) {
+			domain = domain.slice(1);
 		}
 
-		if (proxyHostname.startsWith("*")) {
-			proxyHostname = proxyHostname.slice(1);
+		if (!domain) {
+			return true;
 		}
-		return !hostname.endsWith(proxyHostname);
+
+		if (normalizedTargetHost === domain) {
+			return false;
+		}
+
+		if (normalizedTargetHost.endsWith(`.${domain}`)) {
+			return false;
+		}
+
+		return true;
 	});
 }
 
-function getProxyForUrl(targetUrl: string | URL): string {
+function getProxyForUrl(targetUrl: string | URL, env?: ProviderEnv): string {
 	const parsedUrl = parseProxyTargetUrl(targetUrl);
 	if (!parsedUrl?.protocol || !parsedUrl.host) {
 		return "";
 	}
 
 	const protocol = parsedUrl.protocol.split(":", 1)[0]!;
-	const hostname = parsedUrl.host.replace(/:\d*$/, "");
+	const hostname = stripBrackets(parsedUrl.hostname || parsedUrl.host.replace(/:\d*$/, ""));
 	const port = Number.parseInt(parsedUrl.port, 10) || DEFAULT_PROXY_PORTS[protocol] || 0;
-	if (!shouldProxyHostname(hostname, port)) {
+	if (!shouldProxyHostname(hostname, port, env)) {
 		return "";
 	}
 
-	let proxy = getProxyEnv(`${protocol}_proxy`) || getProxyEnv("all_proxy");
+	let proxy = getProxyEnv(`${protocol}_proxy`, env) || getProxyEnv("all_proxy", env);
 	if (proxy && !proxy.includes("://")) {
 		proxy = `${protocol}://${proxy}`;
 	}
 	return proxy;
 }
 
-export function resolveHttpProxyUrlForTarget(targetUrl: string | URL): URL | undefined {
-	const proxy = getProxyForUrl(targetUrl);
+export const UNSUPPORTED_PROXY_PROTOCOL_MESSAGE =
+	"Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; use an HTTP or HTTPS proxy URL.";
+
+export function resolveHttpProxyUrlForTarget(targetUrl: string | URL, env?: ProviderEnv): URL | undefined {
+	const proxy = getProxyForUrl(targetUrl, env);
 	if (!proxy) {
 		return undefined;
 	}
@@ -108,16 +158,4 @@ export function resolveHttpProxyUrlForTarget(targetUrl: string | URL): URL | und
 	}
 
 	return proxyUrl;
-}
-
-export function createHttpProxyAgentsForTarget(targetUrl: string | URL): NodeHttpProxyAgents | undefined {
-	const proxyUrl = resolveHttpProxyUrlForTarget(targetUrl);
-	if (!proxyUrl) {
-		return undefined;
-	}
-
-	return {
-		httpAgent: new HttpProxyAgent(proxyUrl),
-		httpsAgent: new HttpsProxyAgent(proxyUrl) as unknown as HttpsAgent,
-	};
 }

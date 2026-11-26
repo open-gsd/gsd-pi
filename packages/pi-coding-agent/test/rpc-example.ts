@@ -1,13 +1,13 @@
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
+import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * Interactive example of using coding-agent via RpcClient.
- * Usage: npx tsx test/rpc-example.ts
+ * Usage: node test/rpc-example.ts
  */
 
 async function main() {

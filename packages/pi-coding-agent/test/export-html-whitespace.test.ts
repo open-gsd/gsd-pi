@@ -1,10 +1,10 @@
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component } from "@gsd/pi-tui";
 import { readFileSync } from "fs";
 import { describe, expect, it } from "vitest";
-import { ansiLinesToHtml } from "../src/core/export-html/ansi-to-html.ts";
-import { createToolHtmlRenderer } from "../src/core/export-html/tool-renderer.ts";
-import type { ToolDefinition } from "../src/core/extensions/types.ts";
-import type { Theme } from "../src/modes/interactive/theme/theme.ts";
+import { ansiLinesToHtml } from "../src/core/export-html/ansi-to-html.js";
+import { createToolHtmlRenderer } from "../src/core/export-html/tool-renderer.js";
+import type { ToolDefinition } from "../src/core/extensions/types.js";
+import type { Theme } from "../src/modes/interactive/theme/theme.js";
 
 describe("export HTML tool output whitespace", () => {
 	it("preserves whitespace for plain-text tool output lines without preserving template whitespace", () => {
@@ -22,7 +22,10 @@ describe("export HTML tool output whitespace", () => {
 	});
 
 	it("trims TUI spacing lines from custom tool result HTML", () => {
-		const component: Component = { render: () => ["", "\u001b[31mone\u001b[0m", "two", ""], invalidate: () => {} };
+		const component: Component = {
+			render: () => ["", "\u001b[31mone\u001b[0m", "two", "\u001b[0m\u001b]8;;\u0007"],
+			invalidate: () => {},
+		};
 		const tool = {
 			name: "custom",
 			label: "custom",
@@ -30,7 +33,7 @@ describe("export HTML tool output whitespace", () => {
 			renderResult: () => component,
 		} as unknown as ToolDefinition;
 		const renderer = createToolHtmlRenderer({
-			getToolDefinition: () => tool,
+			getToolRenderers: () => tool,
 			theme: {} as Theme,
 			cwd: "/tmp",
 		});

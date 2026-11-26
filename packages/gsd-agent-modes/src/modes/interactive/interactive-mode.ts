@@ -15,7 +15,8 @@ import {
 	ProcessTerminal,
 	setKeybindings,
 	type Terminal as TuiTerminal,
-	TUI,
+	TuiMainScreen,
+	type TUI,
 } from "@gsd/pi-tui";
 import { VERSION } from "@gsd/pi-coding-agent/config.js";
 import { type AgentSession, type AgentSessionEvent, createInitialTranscriptState, type TranscriptState } from "@gsd/agent-core";
@@ -198,7 +199,7 @@ export class InteractiveMode {
 	) {
 		this.session = session;
 		this.version = VERSION;
-		this.ui = new TUI(options.terminal ?? new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.ui = new TuiMainScreen(options.terminal ?? new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		setRailAnimationEnabled(this.settingsManager.getToolRailAnimation());
 		this.headerContainer = new Container();
@@ -285,8 +286,8 @@ export class InteractiveMode {
 		// footer) stays fixed on screen; the header, chat transcript and pending
 		// messages form the scrolling viewport above it.
 		if (process.env.PI_TUI_FULLSCREEN === "1") {
-			this.ui.setFullscreenPinBoundary(this.statusContainer);
-			this.ui.setFullscreen(true);
+			this.ui.setFullscreenPinBoundary?.(this.statusContainer);
+			this.ui.setFullscreen?.(true);
 		}
 
 		this.setupKeyHandlers();

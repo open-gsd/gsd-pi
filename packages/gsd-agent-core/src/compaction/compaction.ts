@@ -7,7 +7,7 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@gsd/pi-agent-core";
 import type { AssistantMessage, CacheRetention, Context, Model, SimpleStreamOptions, Usage } from "@gsd/pi-ai";
-import { completeSimple } from "@gsd/pi-ai";
+import { completeSimple, normalizeContext } from "@gsd/pi-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -156,7 +156,8 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
  *   legacy de-cumulated proxy.
  */
 export function calculateContextTokens(usage: Usage): number {
-	if (usage.liveContextTokens && usage.liveContextTokens > 0) return usage.liveContextTokens;
+	const liveContextTokens = (usage as Usage & { liveContextTokens?: number }).liveContextTokens;
+	if (liveContextTokens && liveContextTokens > 0) return liveContextTokens;
 	if (usage.totalTokens > 0) return Math.max(0, usage.totalTokens - usage.output);
 	return usage.input + usage.cacheRead + usage.cacheWrite;
 }
@@ -694,7 +695,7 @@ async function completeSummarization(
 	if (!streamFn) {
 		return completeSimple(model, context, options);
 	}
-	const stream = await streamFn(model, context, options);
+	const stream = await streamFn(model, normalizeContext(context), options);
 	return stream.result();
 }
 

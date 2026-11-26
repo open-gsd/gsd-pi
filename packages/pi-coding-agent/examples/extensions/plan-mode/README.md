@@ -4,7 +4,7 @@ Read-only exploration mode for safe code analysis.
 
 ## Features
 
-- **Read-only tools**: Restricts available tools to read, bash, grep, find, ls, question
+- **Built-in write tools disabled**: Disables edit/write while preserving other active tools
 - **Bash allowlist**: Only read-only bash commands are allowed
 - **Plan extraction**: Extracts numbered steps from `Plan:` sections
 - **Progress tracking**: Widget shows completion status during execution
@@ -37,13 +37,12 @@ Plan:
 ## How It Works
 
 ### Plan Mode (Read-Only)
-
-- Only read-only tools available
+- Built-in edit/write tools disabled
+- Other active tools remain available
 - Bash commands filtered through allowlist
 - Agent creates a plan without making changes
 
 ### Execution Mode
-
 - Full tool access restored
 - Agent executes steps in order
 - `[DONE:n]` markers track completion
@@ -52,7 +51,6 @@ Plan:
 ### Command Allowlist
 
 Safe commands (allowed):
-
 - File inspection: `cat`, `head`, `tail`, `less`, `more`
 - Search: `grep`, `find`, `rg`, `fd`
 - Directory: `ls`, `pwd`, `tree`
@@ -61,7 +59,6 @@ Safe commands (allowed):
 - System info: `uname`, `whoami`, `date`, `uptime`
 
 Blocked commands:
-
 - File modification: `rm`, `mv`, `cp`, `mkdir`, `touch`
 - Git write: `git add`, `git commit`, `git push`
 - Package install: `npm install`, `yarn add`, `pip install`

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
-import { getModel } from "../src/models.ts";
+import { getModel } from "../src/compat.js";
+import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.js";
 
 const originalTogetherApiKey = process.env.TOGETHER_API_KEY;
 
@@ -14,7 +14,6 @@ afterEach(() => {
 
 describe("Together models", () => {
 	it("registers the default Kimi K3 model via OpenAI-compatible Chat Completions API", () => {
-		// Together dropped the Kimi K2.x models; K3 is the current Kimi offering.
 		const model = getModel("together", "moonshotai/Kimi-K3");
 
 		expect(model).toBeDefined();
@@ -24,8 +23,8 @@ describe("Together models", () => {
 		expect(model.reasoning).toBe(true);
 		expect(model.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null });
 		expect(model.input).toEqual(["text", "image"]);
-		expect(model.contextWindow).toBe(1_048_576);
-		expect(model.maxTokens).toBe(131_072);
+		expect(model.contextWindow).toBe(1048576);
+		expect(model.maxTokens).toBe(1048576);
 		expect(model.cost).toEqual({
 			input: 3,
 			output: 15,
@@ -34,7 +33,6 @@ describe("Together models", () => {
 		});
 		expect(model.compat).toEqual({
 			supportsStore: false,
-			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
 			maxTokensField: "max_tokens",
 			thinkingFormat: "together",
@@ -45,13 +43,20 @@ describe("Together models", () => {
 
 	it("models Together reasoning controls from the Together API surface", () => {
 		const gptOss = getModel("together", "openai/gpt-oss-120b");
-		expect(gptOss.thinkingLevelMap).toEqual({ off: null, minimal: null });
+		expect(gptOss.thinkingLevelMap).toEqual({
+			off: null,
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			max: null,
+			xhigh: null,
+		});
 		expect(gptOss.compat).toMatchObject({
 			supportsReasoningEffort: true,
 			thinkingFormat: "openai",
 		});
 
-		// Together retired the deepseek-ai/DeepSeek-V4-Pro id; -0813 is the current surface.
 		const deepSeekV4 = getModel("together", "deepseek-ai/DeepSeek-V4-Pro-0813");
 		expect(deepSeekV4.thinkingLevelMap).toEqual({
 			minimal: null,
@@ -64,11 +69,6 @@ describe("Together models", () => {
 			supportsReasoningEffort: true,
 			thinkingFormat: "together",
 		});
-
-		const minimax = getModel("together", "MiniMaxAI/MiniMax-M3");
-		expect(minimax.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null });
-		expect(minimax.compat?.thinkingFormat).toBe("together");
-		expect(minimax.compat?.supportsReasoningEffort).toBe(false);
 	});
 
 	it("resolves TOGETHER_API_KEY from the environment", () => {

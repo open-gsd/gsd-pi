@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@gsd/pi-ai";
 import { isContextOverflow, streamSimple } from "@gsd/pi-ai";
+import { toRecordHeaders } from "../provider-headers.js";
 import { formatNoModelSelectedMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
 import type { CompactionEntry } from "@gsd/pi-coding-agent/core/session-manager.js";
 import { getLatestCompactionEntry } from "@gsd/pi-coding-agent/core/session-manager.js";
@@ -70,6 +71,8 @@ export class AgentSessionCompactionModule {
 					branchEntries: pathEntries,
 					customInstructions,
 					signal: this.host._compactionAbortController.signal,
+					reason: "manual",
+					willRetry: false,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (result?.cancel) {
@@ -103,7 +106,7 @@ export class AgentSessionCompactionModule {
 					customInstructions,
 					this.host._compactionAbortController.signal,
 					this.host.thinkingLevel,
-					this.host.agent.streamFn,
+					this.host.agent.streamFunction,
 					undefined,
 					{
 						systemPrompt: this.host.agent.state.systemPrompt,
@@ -136,6 +139,8 @@ export class AgentSessionCompactionModule {
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,
 					fromExtension,
+					reason: "manual",
+					willRetry: false,
 				});
 			}
 
@@ -277,7 +282,7 @@ export class AgentSessionCompactionModule {
 
 			let apiKey: string | undefined;
 			let headers: Record<string, string> | undefined;
-			if (this.host.agent.streamFn === streamSimple) {
+			if (this.host.agent.streamFunction === streamSimple) {
 				const authResult = await this.host.modelRegistry.getApiKeyAndHeaders(this.host.model);
 				if (!authResult.ok || !authResult.apiKey) {
 					this.host.emit({
@@ -290,7 +295,7 @@ export class AgentSessionCompactionModule {
 					return false;
 				}
 				apiKey = authResult.apiKey;
-				headers = authResult.headers;
+				headers = toRecordHeaders(authResult.headers);
 			} else {
 				({ apiKey, headers } = await this.host.getCompactionRequestAuth(this.host.model));
 			}
@@ -319,6 +324,8 @@ export class AgentSessionCompactionModule {
 					branchEntries: pathEntries,
 					customInstructions: undefined,
 					signal: this.host._autoCompactionAbortController.signal,
+					reason,
+					willRetry,
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
@@ -363,7 +370,7 @@ export class AgentSessionCompactionModule {
 					undefined,
 					this.host._autoCompactionAbortController.signal,
 					this.host.thinkingLevel,
-					this.host.agent.streamFn,
+					this.host.agent.streamFunction,
 					undefined,
 					{
 						systemPrompt: this.host.agent.state.systemPrompt,
@@ -403,6 +410,8 @@ export class AgentSessionCompactionModule {
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,
 					fromExtension,
+					reason: "manual",
+					willRetry: false,
 				});
 			}
 

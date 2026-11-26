@@ -1,9 +1,15 @@
-import type { MouseEvent } from "../mouse.js";
-import type { Component } from "../tui.js";
-import { applyBackgroundToLine, visibleWidth } from "../utils.js";
+import {
+	type ChildLines,
+	type Component,
+	dispatchMouseToChildLines,
+	renderChildLines,
+	type TuiMouseDispatchResult,
+	type TuiMouseEvent,
+} from "../tui.js";
+import { flattenLines, visibleWidth } from "../utils.js";
 
 type RenderCache = {
-	childLines: string[];
+	childLines: readonly string[];
 	width: number;
 	bgSample: string | undefined;
 	lines: string[];
@@ -20,10 +26,7 @@ export class Box implements Component {
 
 	// Cache for rendered output
 	private cache?: RenderCache;
-
-	// Row range each child occupied within the content area (excluding top
-	// padding) at the last render, used to route mouse events to children.
-	private childRanges: { component: Component; start: number; lineCount: number }[] = [];
+	private childLines?: ChildLines;
 
 	constructor(paddingX = 1, paddingY = 1, bgFn?: (text: string) => string) {
 		this.paddingX = paddingX;
@@ -54,19 +57,14 @@ export class Box implements Component {
 		// Don't invalidate here - we'll detect bgFn changes by sampling output
 	}
 
-	private invalidateCache(): void {
-		this.cache = undefined;
+	setPaddingX(paddingX: number): void {
+		this.paddingX = paddingX;
+		this.invalidateCache();
 	}
 
-	private matchCache(width: number, childLines: string[], bgSample: string | undefined): boolean {
-		const cache = this.cache;
-		return (
-			!!cache &&
-			cache.width === width &&
-			cache.bgSample === bgSample &&
-			cache.childLines.length === childLines.length &&
-			cache.childLines.every((line, i) => line === childLines[i])
-		);
+	private invalidateCache(): void {
+		this.cache = undefined;
+		this.childLines = undefined;
 	}
 
 	invalidate(): void {
@@ -76,7 +74,20 @@ export class Box implements Component {
 		}
 	}
 
-	render(width: number): string[] {
+	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+		const contentWidth = Math.max(1, event.width - this.paddingX * 2);
+		const contentY = event.y - this.paddingY;
+		const contentX = event.x - this.paddingX;
+		if (contentY < 0 || contentX < 0 || contentX >= contentWidth) return undefined;
+
+		const layout =
+			this.childLines?.width === contentWidth
+				? this.childLines
+				: renderChildLines(this.children, contentWidth, undefined);
+		return dispatchMouseToChildLines(layout, { ...event, x: contentX, y: contentY, width: contentWidth });
+	}
+
+	render(width: number): readonly string[] {
 		if (this.children.length === 0) {
 			return [];
 		}
@@ -84,16 +95,10 @@ export class Box implements Component {
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
 		const leftPad = " ".repeat(this.paddingX);
 
-		// Render all children
-		const childLines: string[] = [];
-		this.childRanges = [];
-		for (const child of this.children) {
-			const lines = child.render(contentWidth);
-			this.childRanges.push({ component: child, start: childLines.length, lineCount: lines.length });
-			for (const line of lines) {
-				childLines.push(leftPad + line);
-			}
-		}
+		// Keep the child lines unpadded: unchanged children keep their line array, so the cache check
+		// below is one identity comparison. Padding here would create new strings every frame.
+		this.childLines = renderChildLines(this.children, contentWidth, this.childLines);
+		const childLines = this.childLines.lines;
 
 		if (childLines.length === 0) {
 			return [];
@@ -103,8 +108,9 @@ export class Box implements Component {
 		const bgSample = this.bgFn ? this.bgFn("test") : undefined;
 
 		// Check cache validity
-		if (this.matchCache(width, childLines, bgSample)) {
-			return this.cache!.lines;
+		const cache = this.cache;
+		if (cache?.childLines === childLines && cache.width === width && cache.bgSample === bgSample) {
+			return cache.lines;
 		}
 
 		// Apply background and padding
@@ -117,7 +123,7 @@ export class Box implements Component {
 
 		// Content
 		for (const line of childLines) {
-			result.push(this.applyBg(line, width));
+			result.push(this.applyBg(leftPad + line, width));
 		}
 
 		// Bottom padding
@@ -126,34 +132,17 @@ export class Box implements Component {
 		}
 
 		// Update cache
+		flattenLines(result);
 		this.cache = { childLines, width, bgSample, lines: result };
 
 		return result;
-	}
-
-	handleMouse(event: MouseEvent): void {
-		// Translate from box-local coordinates into the child content area by
-		// removing the top/left padding, then find the child under the pointer.
-		const contentRow = event.y - this.paddingY;
-		const contentCol = event.x - this.paddingX;
-		if (contentRow < 0 || contentCol < 0) return;
-
-		for (const range of this.childRanges) {
-			if (contentRow >= range.start && contentRow < range.start + range.lineCount) {
-				range.component.handleMouse?.({ ...event, x: contentCol, y: contentRow - range.start });
-				return;
-			}
-		}
 	}
 
 	private applyBg(line: string, width: number): string {
 		const visLen = visibleWidth(line);
 		const padNeeded = Math.max(0, width - visLen);
 		const padded = line + " ".repeat(padNeeded);
-
-		if (this.bgFn) {
-			return applyBackgroundToLine(padded, width, this.bgFn);
-		}
-		return padded;
+		// Already padded to width, so apply the background directly instead of measuring the line again.
+		return this.bgFn ? this.bgFn(padded) : padded;
 	}
 }

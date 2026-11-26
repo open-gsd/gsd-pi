@@ -1,0 +1,154 @@
+import type { Box, TuiMouseEvent } from "@gsd/pi-tui";
+import { beforeAll, describe, expect, test } from "vitest";
+import type { MarkdownTransformContext, MarkdownTransformer } from "../src/core/extensions/types.js";
+import { BranchSummaryMessageComponent } from "../src/modes/interactive/components/branch-summary-message.js";
+import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.js";
+import { SkillInvocationMessageComponent } from "../src/modes/interactive/components/skill-invocation-message.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
+
+const WIDTH = 80;
+
+function renderText(component: Box): string {
+	return stripAnsi(component.render(WIDTH).join("\n"));
+}
+
+function clickRow(component: Box, marker: string): void {
+	const lines = component.render(WIDTH);
+	const row = lines.findIndex((line) => stripAnsi(line).includes(marker));
+	expect(row).toBeGreaterThanOrEqual(0);
+	const event: TuiMouseEvent = {
+		type: "click",
+		button: "left",
+		x: 2,
+		y: row,
+		screenX: 2,
+		screenY: row,
+		width: WIDTH,
+		height: lines.length,
+		shift: false,
+		alt: false,
+		ctrl: false,
+		clickCount: 1,
+	};
+	expect(component.handleMouse(event)?.handled).toBe(true);
+}
+
+describe("collapsible message components", () => {
+	beforeAll(() => initTheme("dark"));
+
+	test("toggles a compaction summary when clicked", () => {
+		const component = new CompactionSummaryMessageComponent({
+			role: "compactionSummary",
+			summary: "compaction details",
+			tokensBefore: 1234,
+			timestamp: Date.now(),
+		});
+
+		expect(renderText(component)).not.toContain("compaction details");
+		clickRow(component, "[compaction]");
+		expect(renderText(component)).toContain("compaction details");
+		clickRow(component, "[compaction]");
+		expect(renderText(component)).not.toContain("compaction details");
+	});
+
+	test("toggles a branch summary when clicked", () => {
+		const component = new BranchSummaryMessageComponent({
+			role: "branchSummary",
+			summary: "branch details",
+			fromId: "entry-1",
+			timestamp: Date.now(),
+		});
+
+		expect(renderText(component)).not.toContain("branch details");
+		clickRow(component, "[branch]");
+		expect(renderText(component)).toContain("branch details");
+		clickRow(component, "[branch]");
+		expect(renderText(component)).not.toContain("branch details");
+	});
+
+	test("toggles a skill invocation when clicked", () => {
+		const component = new SkillInvocationMessageComponent({
+			name: "example-skill",
+			location: "/tmp/example-skill.md",
+			content: "skill details",
+			userMessage: undefined,
+		});
+
+		expect(renderText(component)).not.toContain("skill details");
+		clickRow(component, "[skill]");
+		expect(renderText(component)).toContain("skill details");
+		clickRow(component, "[skill]");
+		expect(renderText(component)).not.toContain("skill details");
+	});
+
+	describe("Markdown transformers", () => {
+		const seen: Array<{ markdown: string; context: MarkdownTransformContext }> = [];
+		const transformers: MarkdownTransformer[] = [
+			(markdown, context) => {
+				seen.push({ markdown, context });
+				return markdown.replace("details", "transformed");
+			},
+		];
+
+		test.each([
+			{
+				kind: "compaction summary",
+				messageType: "summary",
+				header: "Compacted from 1,234 tokens",
+				create: () =>
+					new CompactionSummaryMessageComponent(
+						{ role: "compactionSummary", summary: "details", tokensBefore: 1234, timestamp: Date.now() },
+						undefined,
+						1,
+						transformers,
+						"entry-1",
+					),
+			},
+			{
+				kind: "branch summary",
+				messageType: "summary",
+				header: "Branch Summary",
+				create: () =>
+					new BranchSummaryMessageComponent(
+						{ role: "branchSummary", summary: "details", fromId: "entry-0", timestamp: Date.now() },
+						undefined,
+						1,
+						transformers,
+						"entry-1",
+					),
+			},
+			{
+				kind: "skill",
+				messageType: "custom",
+				header: "example-skill",
+				create: () =>
+					new SkillInvocationMessageComponent(
+						{
+							name: "example-skill",
+							location: "/tmp/example-skill.md",
+							content: "details",
+							userMessage: undefined,
+						},
+						undefined,
+						1,
+						transformers,
+						"entry-1",
+					),
+			},
+		])("runs as $messageType on expanded $kind content without Pi's header", ({ messageType, header, create }) => {
+			seen.length = 0;
+			const component = create();
+			component.setExpanded(true);
+
+			const rendered = renderText(component);
+			expect(rendered).toContain(header);
+			expect(rendered).toContain("transformed");
+			expect(rendered).not.toContain("details");
+			expect(seen[0]).toMatchObject({
+				markdown: "details",
+				context: { messageType, messageId: "entry-1" },
+			});
+		});
+	});
+});

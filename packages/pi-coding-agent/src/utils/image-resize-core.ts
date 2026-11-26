@@ -18,6 +18,16 @@ export interface ResizedImage {
 	wasResized: boolean;
 }
 
+/**
+ * Tag on image resize worker replies. Node can post its own messages on the worker channel
+ * (for example `{ "watch:require": [...] }` under `node --watch`), so replies must be identifiable.
+ */
+export const IMAGE_RESIZE_WORKER_RESPONSE_TYPE = "pi:image-resize-response";
+
+export type ResizeImageWorkerResponse =
+	| { type: typeof IMAGE_RESIZE_WORKER_RESPONSE_TYPE; result: ResizedImage | null }
+	| { type: typeof IMAGE_RESIZE_WORKER_RESPONSE_TYPE; error: string };
+
 // 4.5MB of base64 payload. Provides headroom below Anthropic's 5MB limit.
 const DEFAULT_MAX_BYTES = 4.5 * 1024 * 1024;
 
@@ -124,9 +134,11 @@ export async function resizeImageInProcess(
 		let currentHeight = targetHeight;
 
 		while (true) {
-			const candidates = tryEncodings(currentWidth, currentHeight, qualitySteps);
-			for (const candidate of candidates) {
-				if (candidate.encodedSize < opts.maxBytes) {
+			const [png, jpeg, ...lowerQualityJpegs] = tryEncodings(currentWidth, currentHeight, qualitySteps);
+			// Prefer the smaller of PNG and JPEG at the configured quality; lower JPEG quality only if neither fits.
+			const preferred = jpeg && jpeg.encodedSize < png.encodedSize ? [jpeg, png] : [png, jpeg];
+			for (const candidate of [...preferred, ...lowerQualityJpegs]) {
+				if (candidate && candidate.encodedSize < opts.maxBytes) {
 					return {
 						data: candidate.data,
 						mimeType: candidate.mimeType,

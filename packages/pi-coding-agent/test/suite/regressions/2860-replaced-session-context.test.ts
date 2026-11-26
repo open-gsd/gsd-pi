@@ -1,18 +1,19 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@gsd/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentSession } from "@gsd/agent-core";
+import type { AgentSession } from "../../../src/core/agent-session.js";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
-import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.ts";
+} from "../../../src/core/agent-session-runtime.js";
+import { AuthStorage } from "../../../src/core/auth-storage.js";
+import { ModelRuntime } from "../../../src/core/model-runtime.js";
+import { SessionManager } from "../../../src/core/session-manager.js";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.js";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {
@@ -45,13 +46,17 @@ describe("regression #2860: replaced session callbacks", () => {
 		faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
 
 		const authStorage = AuthStorage.inMemory();
-		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
+		const modelRuntime = await ModelRuntime.create({
+			credentials: authStorage,
+			modelsPath: join(tempDir, "models.json"),
+		});
 
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir: tempDir,
-				authStorage,
+				modelRuntime,
 				resourceLoaderOptions: {
 					extensionFactories: [
 						(pi: ExtensionAPI) => {
@@ -196,10 +201,11 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(replacementSessionFile).not.toBe(oldSessionFile);
 		expect(staleCtxThrows).toBe(true);
 		expect(stalePiThrows).toBe(true);
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
-			"user:Hello from the new session!",
-			"assistant:hello reply",
-		]);
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "system")
+				.map((message) => `${message.role}:${getText(message)}`),
+		).toEqual(["user:Hello from the new session!", "assistant:hello reply"]);
 	});
 
 	it("supports withSession for fork", async () => {
@@ -227,12 +233,11 @@ describe("regression #2860: replaced session callbacks", () => {
 		await runtime.session.prompt("seed");
 		await runtime.session.prompt("/fork-it");
 
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
-			"user:seed",
-			"assistant:seed reply",
-			"user:fork callback message",
-			"assistant:fork reply",
-		]);
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "system")
+				.map((message) => `${message.role}:${getText(message)}`),
+		).toEqual(["user:seed", "assistant:seed reply", "user:fork callback message", "assistant:fork reply"]);
 	});
 
 	it("supports withSession for switchSession", async () => {
@@ -264,11 +269,10 @@ describe("regression #2860: replaced session callbacks", () => {
 		await runtime.session.prompt("/switch-it");
 
 		expect(runtime.session.sessionFile).toBe(targetSessionPath);
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
-			"user:target",
-			"assistant:target reply",
-			"user:switch callback message",
-			"assistant:switch reply",
-		]);
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "system")
+				.map((message) => `${message.role}:${getText(message)}`),
+		).toEqual(["user:target", "assistant:target reply", "user:switch callback message", "assistant:switch reply"]);
 	});
 });

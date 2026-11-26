@@ -2,7 +2,7 @@
 // Maps tool names to their provider compatibility metadata.
 // Used by the model router to filter tools incompatible with the selected provider.
 
-import type { ToolCompatibility } from "../extensions/types.js";
+import type { ToolCompatibility } from "../gsd-extension-types.js";
 
 // ─── Registry State ─────────────────────────────────────────────────────────
 

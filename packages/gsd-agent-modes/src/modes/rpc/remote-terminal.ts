@@ -1,4 +1,4 @@
-import type { Terminal } from "@gsd/pi-tui";
+import type { ProgramStatus, Terminal } from "@gsd/pi-tui";
 
 export interface RemoteTerminalOptions {
 	onWrite: (data: string) => void;
@@ -85,6 +85,10 @@ export class RemoteTerminal implements Terminal {
 
 	setProgress(_active: boolean): void {
 		// Browser-backed terminals do not expose native progress state.
+	}
+
+	setProgramStatus(_status: ProgramStatus): void {
+		// Browser transport ignores OSC 7501 program status.
 	}
 
 	hideCursor(): void {

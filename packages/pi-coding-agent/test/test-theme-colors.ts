@@ -1,5 +1,5 @@
 import fs from "fs";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 // --- Color utilities ---
 
@@ -222,6 +222,9 @@ function cmdTheme(themeName: string): void {
 
 	console.log("\n--- Backgrounds ---");
 	console.log("userMessageBg:", theme.bg("userMessageBg", " Sample "));
+	const searchMatch = theme.bg("searchMatchBg", theme.fg("searchMatchText", " Sample "));
+	console.log("searchMatch:", theme.underline(searchMatch));
+	console.log("searchCurrentMatch:", theme.bold(theme.inverse(searchMatch)));
 	console.log("toolPendingBg:", theme.bg("toolPendingBg", " Sample "));
 	console.log("toolSuccessBg:", theme.bg("toolSuccessBg", " Sample "));
 	console.log("toolErrorBg:", theme.bg("toolErrorBg", " Sample "));
@@ -239,8 +242,11 @@ if (cmd === "contrast") {
 } else if (cmd === "light" || cmd === "dark") {
 	cmdTheme(cmd);
 } else {
-	console.log("Usage:");
-	console.log("  npx tsx test-theme-colors.ts light|dark     Test built-in theme");
-	console.log("  npx tsx test-theme-colors.ts contrast 4.5   Compute colors at ratio");
-	console.log("  npx tsx test-theme-colors.ts test file.json Test any JSON file");
+	console.log("Usage (from packages/coding-agent):");
+	console.log("  node --import ./src/experimental/source-resolver.ts test/test-theme-colors.ts <command>");
+	console.log("");
+	console.log("Commands:");
+	console.log("  light|dark     Test built-in theme");
+	console.log("  contrast 4.5   Compute colors at ratio");
+	console.log("  test file.json Test any JSON file");
 }

@@ -1,0 +1,115 @@
+// @ts-nocheck
+/**
+ * Presentation for the shell tools.
+ *
+ * Renderers live apart from the implementation so a process that only displays tool output does not
+ * load the execution path or its typebox parameter schema. `bash.ts` spreads these into the shell
+ * tool definition, so the tool's public shape is unchanged.
+ */
+
+import { Container, Spacer, Text } from "@gsd/pi-tui";
+import { keyHint } from "@gsd/agent-modes/modes/interactive/components/keybinding-hints.js";
+import { VisualLinePreview } from "@gsd/agent-modes/modes/interactive/components/visual-truncate.js";
+import { theme } from "../../../theme/theme.js";
+import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.js";
+import type { BashToolDetails } from "../bash.js";
+import { getTextOutput, invalidArgText, startToolTimer, str, toolTimerText } from "../render-utils.js";
+import { DEFAULT_MAX_BYTES, formatSize } from "../truncate.js";
+
+const BASH_PREVIEW_LINES = 5;
+export const BASH_UPDATE_THROTTLE_MS = 100;
+function formatShellCall(args: { command?: string; timeout?: number } | undefined, prompt: string): string {
+	const command = str(args?.command);
+	const timeout = args?.timeout as number | undefined;
+	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
+	return theme.fg("toolTitle", theme.bold(`${prompt} ${commandDisplay}`)) + timeoutSuffix;
+}
+function rebuildBashResultRenderComponent(
+	component: Container,
+	result: {
+		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+		details?: BashToolDetails;
+	},
+	options: ToolRenderResultOptions,
+	showImages: boolean,
+	timerText: string | undefined,
+): void {
+	component.clear();
+
+	let output = getTextOutput(result as any, showImages).trim();
+	const truncation = result.details?.truncation;
+	const fullOutputPath = result.details?.fullOutputPath;
+	const fullOutputError = result.details?.fullOutputError;
+	// The model's footer names the file or why it could not be saved; the warning below says the same.
+	const footerMarker = fullOutputPath ?? fullOutputError;
+	if (!options.isPartial && truncation?.truncated && footerMarker && output.endsWith("]")) {
+		const footerStart = output.lastIndexOf("\n\n[");
+		if (footerStart !== -1 && output.slice(footerStart).includes(footerMarker)) {
+			output = output.slice(0, footerStart).trimEnd();
+		}
+	}
+
+	if (output) {
+		const styledOutput = output
+			.split("\n")
+			.map((line) => theme.fg("toolOutput", line))
+			.join("\n");
+
+		if (options.expanded) {
+			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
+		} else {
+			component.addChild(new Spacer(1));
+			component.addChild(
+				new VisualLinePreview({
+					text: styledOutput,
+					maxVisualLines: BASH_PREVIEW_LINES,
+					keep: "end",
+					formatHint: (hidden) =>
+						theme.fg("muted", `... (${hidden} earlier lines,`) +
+						` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+				}),
+			);
+		}
+	}
+
+	if (truncation?.truncated || fullOutputPath || fullOutputError) {
+		const warnings: string[] = [];
+		if (fullOutputPath) {
+			warnings.push(`Full output: ${fullOutputPath}`);
+		} else if (fullOutputError) {
+			warnings.push(`Could not save the full output: ${fullOutputError}`);
+		}
+		if (truncation?.truncated) {
+			if (truncation.truncatedBy === "lines") {
+				warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
+			} else {
+				warnings.push(
+					`Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`,
+				);
+			}
+		}
+		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
+	}
+
+	if (timerText) component.addChild(new Text(`\n${theme.fg("muted", timerText)}`, 0, 0));
+}
+
+/** Shell renderers are shared by bash and powershell, which differ only in the prompt they display. */
+export function createShellRenderers(prompt: string): Pick<ToolDefinition<any, any>, "renderCall" | "renderResult"> {
+	return {
+		renderCall(args, _theme, context) {
+			startToolTimer(context);
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(formatShellCall(args as { command?: string; timeout?: number } | undefined, prompt));
+			return text;
+		},
+		renderResult(result, options, _theme, context) {
+			const timerText = toolTimerText(context, options.isPartial);
+			const component = (context.lastComponent as Container | undefined) ?? new Container();
+			rebuildBashResultRenderComponent(component, result as any, options, context.showImages, timerText);
+			component.invalidate();
+			return component;
+		},
+	};
+}

@@ -1,0 +1,38 @@
+{
+  "name": "@gsd/pi-mcp",
+  "version": "1.0.2",
+  "description": "MCP helpers (vendored from earendil-works/pi)",
+  "type": "module",
+  "gsd": {
+    "linkable": true,
+    "scope": "@gsd",
+    "name": "pi-mcp"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./oauth": {
+      "types": "./dist/oauth/index.d.ts",
+      "import": "./dist/oauth/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false"
+  },
+  "dependencies": {
+    "cross-spawn": "7.0.6",
+    "@sinclair/typebox": "^0.34.41"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "6.0.6",
+    "vitest": "4.1.12"
+  }
+}

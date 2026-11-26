@@ -1,7 +1,9 @@
+import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 
 const bedrockMock = vi.hoisted(() => ({
 	constructorCalls: [] as Array<Record<string, unknown>>,
+	streamEvents: undefined as unknown[] | undefined,
 }));
 
 vi.mock("@aws-sdk/client-bedrock-runtime", () => {
@@ -12,7 +14,16 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => {
 			bedrockMock.constructorCalls.push(config);
 		}
 
-		send(): Promise<never> {
+		send(): Promise<unknown> {
+			if (bedrockMock.streamEvents) {
+				const events = bedrockMock.streamEvents;
+				return Promise.resolve({
+					$metadata: { httpStatusCode: 200 },
+					stream: (async function* () {
+						yield* events;
+					})(),
+				});
+			}
 			return Promise.reject(new Error("mock send"));
 		}
 	}
@@ -44,15 +55,35 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => {
 	};
 });
 
-import { getModel } from "../src/models.ts";
-import { streamBedrock } from "../src/providers/amazon-bedrock.ts";
-import type { Context, Message } from "../src/types.ts";
+import { stream as streamBedrock } from "../src/api/bedrock-converse-stream.js";
+import type { Context, Message, Model } from "../src/types.js";
+import { normalizeContext } from "../src/utils/transcript.js";
 
-const baseModel = getModel("amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+const baseModel: Model<"bedrock-converse-stream"> = {
+	id: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+	name: "Claude Sonnet 4.5 (US)",
+	api: "bedrock-converse-stream",
+	provider: "amazon-bedrock",
+	baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	contextWindow: 200000,
+	maxTokens: 64000,
+	compat: { supportsStrictMode: true },
+};
 
-async function capturePayload(context: Context): Promise<unknown> {
+const novaModel: Model<"bedrock-converse-stream"> = {
+	...baseModel,
+	id: "amazon.nova-lite-v1:0",
+	name: "Nova Lite",
+	reasoning: false,
+	compat: undefined,
+};
+
+async function capturePayload(context: Context, model = baseModel): Promise<unknown> {
 	let capturedPayload: unknown;
-	const s = streamBedrock(baseModel, context, {
+	const s = streamBedrock(model, normalizeContext(context), {
 		cacheRetention: "none",
 		signal: AbortSignal.abort(),
 		onPayload: (payload) => {
@@ -65,6 +96,83 @@ async function capturePayload(context: Context): Promise<unknown> {
 	}
 	return capturedPayload;
 }
+
+describe("Bedrock constrained sampling", () => {
+	it("gates native strict tool use by model capability", async () => {
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the tool", timestamp: Date.now() }],
+			tools: [
+				{
+					name: "lookup",
+					description: "Look up a value",
+					parameters: Type.Object({ value: Type.String() }),
+					constrainedSampling: { type: "json_schema", strict: "require" },
+				},
+			],
+		};
+		const payload = await capturePayload(context);
+		const toolConfig = (payload as { toolConfig: { tools: Array<{ toolSpec: { strict?: boolean } }> } }).toolConfig;
+		expect(toolConfig.tools[0].toolSpec.strict).toBe(true);
+
+		context.tools![0].constrainedSampling = { type: "json_schema", strict: "prefer" };
+		const novaPayload = await capturePayload(context, novaModel);
+		const novaToolConfig = (
+			novaPayload as {
+				toolConfig: { tools: Array<{ toolSpec: { strict?: boolean } }> };
+			}
+		).toolConfig;
+		expect(novaToolConfig.tools[0].toolSpec.strict).toBeUndefined();
+	});
+});
+
+describe("Bedrock tool arguments", () => {
+	it("preserves empty property names in streamed tool arguments", async () => {
+		bedrockMock.streamEvents = [
+			{ messageStart: { role: "assistant" } },
+			{
+				contentBlockStart: {
+					contentBlockIndex: 0,
+					start: { toolUse: { toolUseId: "tool-1", name: "edit" } },
+				},
+			},
+			{
+				contentBlockDelta: {
+					contentBlockIndex: 0,
+					delta: {
+						toolUse: {
+							input: '{"path":"/workspace/foobar/file.js","edits":[{"oldText":"first","newText":"updated first"},{"oldText":"second","newText":"updated second","":""}]}',
+						},
+					},
+				},
+			},
+			{ contentBlockStop: { contentBlockIndex: 0 } },
+			{ messageStop: { stopReason: "tool_use" } },
+		];
+
+		try {
+			const message = await streamBedrock(
+				baseModel,
+				normalizeContext({ messages: [{ role: "user", content: "Use the tool", timestamp: Date.now() }] }),
+				{ cacheRetention: "none" },
+			).result();
+
+			expect(message.content[0]).toEqual({
+				type: "toolCall",
+				id: "tool-1",
+				name: "edit",
+				arguments: {
+					path: "/workspace/foobar/file.js",
+					edits: [
+						{ oldText: "first", newText: "updated first" },
+						{ oldText: "second", newText: "updated second", "": "" },
+					],
+				},
+			});
+		} finally {
+			bedrockMock.streamEvents = undefined;
+		}
+	});
+});
 
 describe("bedrock convertMessages skips unknown content types", () => {
 	it("skips unknown user content blocks instead of throwing", async () => {
@@ -117,7 +225,7 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		expect(p.messages[0].content[0]).toEqual({ text: "hello" });
 	});
 
-	it("skips user messages with only unknown content blocks", async () => {
+	it("replaces user messages with only unknown content blocks with a placeholder", async () => {
 		const messages: Message[] = [
 			{
 				role: "user",
@@ -128,7 +236,185 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		const payload = await capturePayload({ messages });
 		expect(payload).toBeDefined();
 		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		expect(p.messages).toHaveLength(1);
+		expect(p.messages[0].content).toEqual([{ text: "<empty>" }]);
+	});
+
+	it("replaces blank user string content with a placeholder", async () => {
+		const payload = await capturePayload({
+			messages: [{ role: "user", content: "   ", timestamp: Date.now() }],
+		});
+		expect(payload).toBeDefined();
+		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		expect(p.messages).toHaveLength(1);
+		expect(p.messages[0].content).toEqual([{ text: "<empty>" }]);
+	});
+
+	it("filters blank user text blocks when other content remains", async () => {
+		const payload = await capturePayload({
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "" },
+						{ type: "text", text: "hello" },
+					],
+					timestamp: Date.now(),
+				},
+			],
+		});
+		expect(payload).toBeDefined();
+		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		expect(p.messages).toHaveLength(1);
+		expect(p.messages[0].content).toEqual([{ text: "hello" }]);
+	});
+
+	it("replaces user content emptied by surrogate sanitization with a placeholder", async () => {
+		const payload = await capturePayload({
+			messages: [{ role: "user", content: String.fromCharCode(0xd83d), timestamp: Date.now() }],
+		});
+		expect(payload).toBeDefined();
+		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
+		expect(p.messages).toHaveLength(1);
+		expect(p.messages[0].content).toEqual([{ text: "<empty>" }]);
+	});
+
+	it("skips assistant text blocks emptied by surrogate sanitization", async () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: String.fromCharCode(0xd83d) }],
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+				model: baseModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+		];
+		const payload = await capturePayload({ messages });
+		expect(payload).toBeDefined();
+		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
 		expect(p.messages).toHaveLength(0);
+	});
+
+	it("replaces blank tool result content with a placeholder", async () => {
+		const messages: Message[] = [
+			{
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "tool",
+				content: [{ type: "text", text: "" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		];
+		const payload = await capturePayload({ messages });
+		expect(payload).toBeDefined();
+		const p = payload as {
+			messages: Array<{ role: string; content: Array<{ toolResult: { content: unknown[] } }> }>;
+		};
+		expect(p.messages).toHaveLength(1);
+		expect(p.messages[0].content[0].toolResult.content).toEqual([{ text: "<empty>" }]);
+	});
+
+	// Regression for #10794: Claude rejects error tool results that contain images.
+	it("moves images of error tool results after the tool results", async () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "call-1", name: "codemode", arguments: {} },
+					{ type: "toolCall", id: "call-2", name: "read", arguments: {} },
+				],
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+				model: baseModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "codemode",
+				content: [
+					{ type: "text", text: "Script failed" },
+					{ type: "image", data: "AAAA", mimeType: "image/png" },
+					{ type: "text", text: "Script error" },
+				],
+				isError: true,
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call-2",
+				toolName: "read",
+				content: [{ type: "image", data: "BBBB", mimeType: "image/png" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		];
+		const payload = (await capturePayload({ messages })) as {
+			messages: Array<{ role: string; content: Array<Record<string, any>> }>;
+		};
+		const content = payload.messages[1].content;
+		expect(content).toHaveLength(4);
+		expect(content[0].toolResult).toEqual({
+			toolUseId: "call-1",
+			content: [
+				{ text: "Script failed" },
+				{ text: "(image attached after the tool results)" },
+				{ text: "Script error" },
+			],
+			status: "error",
+		});
+		expect(content[1].toolResult.status).toBe("success");
+		expect(content[1].toolResult.content).toEqual([{ image: expect.objectContaining({ format: "png" }) }]);
+		expect(content[2]).toEqual({ text: "Images from the error result of tool call call-1 (codemode):" });
+		expect(content[3]).toEqual({ image: expect.objectContaining({ format: "png" }) });
+	});
+
+	it("keeps images in error tool results for non-Claude models", async () => {
+		const messages: Message[] = [
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "codemode",
+				content: [
+					{ type: "text", text: "Script failed" },
+					{ type: "image", data: "AAAA", mimeType: "image/png" },
+				],
+				isError: true,
+				timestamp: Date.now(),
+			},
+		];
+		const payload = (await capturePayload({ messages }, novaModel)) as {
+			messages: Array<{ role: string; content: Array<Record<string, any>> }>;
+		};
+		expect(payload.messages[0].content).toEqual([
+			{
+				toolResult: {
+					toolUseId: "call-1",
+					content: [{ text: "Script failed" }, { image: expect.objectContaining({ format: "png" }) }],
+					status: "error",
+				},
+			},
+		]);
 	});
 
 	it("skips assistant messages with only unknown content blocks", async () => {
@@ -156,125 +442,25 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		const p = payload as { messages: Array<{ role: string; content: unknown[] }> };
 		expect(p.messages).toHaveLength(0);
 	});
-});
 
-function bedrockAssistantToolCall(id: string): Message {
-	return {
-		role: "assistant",
-		content: [{ type: "toolCall", id, name: "browser_click", arguments: { selector: "#missing" } }],
-		api: "bedrock-converse-stream",
-		provider: "amazon-bedrock",
-		model: baseModel.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "toolUse",
-		timestamp: Date.now(),
-	};
-}
-
-const TEST_IMAGE = { type: "image" as const, data: "dGVzdA==", mimeType: "image/png" };
-
-/**
- * Bedrock Claude rejects tool results with status=error whose content carries
- * non-text blocks (same constraint as the Anthropic Messages API), and the
- * poisoned result is replayed every turn, wedging the session (#2438). The
- * transport must serialize error tool results text-only and hoist images into
- * sibling content after the tool_result run. Success-path results are
- * unchanged.
- */
-describe("bedrock convertMessages error tool result image splitting", () => {
-	it("keeps image blocks out of error tool result content and hoists them into sibling content", async () => {
-		const messages: Message[] = [
-			bedrockAssistantToolCall("toolu_01"),
-			{
-				role: "toolResult",
-				toolCallId: "toolu_01",
-				toolName: "browser_click",
-				content: [
-					{ type: "text", text: "Click failed: selector not found" },
-					{ ...TEST_IMAGE },
-				],
-				details: { error: "selector not found" },
-				isError: true,
-				timestamp: Date.now(),
-			},
-		];
-
-		const payload = await capturePayload({ messages });
-		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: any[] }> };
-		expect(p.messages).toHaveLength(2);
-		expect(p.messages[1].role).toBe("user");
-
-		const content = p.messages[1].content;
-		const toolResults = content.filter((b) => "toolResult" in b);
-		expect(toolResults).toHaveLength(1);
-		const tr = toolResults[0].toolResult as { toolUseId: string; status: string; content: any[] };
-		expect(tr.toolUseId).toBe("toolu_01");
-		expect(tr.status).toBe("error");
-
-		// The error tool result itself must not carry any image block.
-		const serialized = JSON.stringify(tr.content);
-		expect(serialized).not.toContain('"image"');
-		expect(serialized).not.toContain('"format"');
-		// Text survives, with a note where the image was omitted.
-		expect(serialized).toContain("Click failed: selector not found");
-		expect(serialized).toContain("image omitted from tool error");
-
-		// The image is hoisted into sibling content after the tool result run.
-		const imageBlocks = content.filter((b) => "image" in b);
-		expect(imageBlocks).toHaveLength(1);
-		expect(content[content.length - 1].image.format).toBe("png");
-	});
-
-	it("leaves success-path tool results with images unchanged (no hoisting)", async () => {
-		const messages: Message[] = [
-			bedrockAssistantToolCall("toolu_02"),
-			{
-				role: "toolResult",
-				toolCallId: "toolu_02",
-				toolName: "browser_screenshot",
-				content: [
-					{ type: "text", text: "Screenshot captured" },
-					{ ...TEST_IMAGE },
-				],
-				isError: false,
-				timestamp: Date.now(),
-			},
-		];
-
-		const payload = await capturePayload({ messages });
-		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: any[] }> };
-		expect(p.messages).toHaveLength(2);
-		const content = p.messages[1].content;
-		expect(content).toHaveLength(1);
-		const tr = content[0].toolResult as { toolUseId: string; status: string; content: any[] };
-		expect(tr.toolUseId).toBe("toolu_02");
-		expect(tr.status).toBe("success");
-		// Unchanged: text then image inside the tool result content.
-		expect(tr.content).toHaveLength(2);
-		expect(tr.content[0]).toEqual({ text: "Screenshot captured" });
-		expect(tr.content[1].image.format).toBe("png");
-		// Exact image bytes survive (a dropped or corrupted screenshot must fail).
-		expect(Buffer.from(tr.content[1].image.source.bytes).toString("base64")).toBe("dGVzdA==");
-		expect(content.filter((b) => "image" in b)).toHaveLength(0);
-	});
-
-	it("hoists only after the whole run when errors and successes interleave", async () => {
+	it("removes empty property names only from replayed Bedrock input", async () => {
+		const toolArguments: { path: string; edits: Array<Record<string, string>> } = {
+			path: "/workspace/foobar/file.js",
+			edits: [
+				{ oldText: "first", newText: "updated first" },
+				{ oldText: "second", newText: "updated second", "": "" },
+			],
+		};
 		const messages: Message[] = [
 			{
 				role: "assistant",
 				content: [
-					{ type: "toolCall", id: "toolu_04a", name: "browser_click", arguments: { selector: "#a" } },
-					{ type: "toolCall", id: "toolu_04b", name: "browser_screenshot", arguments: {} },
-					{ type: "toolCall", id: "toolu_04c", name: "browser_navigate", arguments: { url: "http://x" } },
+					{
+						type: "toolCall",
+						id: "tool-1",
+						name: "edit",
+						arguments: toolArguments,
+					},
 				],
 				api: "bedrock-converse-stream",
 				provider: "amazon-bedrock",
@@ -292,92 +478,26 @@ describe("bedrock convertMessages error tool result image splitting", () => {
 			},
 			{
 				role: "toolResult",
-				toolCallId: "toolu_04a",
-				toolName: "browser_click",
-				content: [
-					{ type: "text", text: "Click failed: selector not found" },
-					{ ...TEST_IMAGE },
-				],
-				isError: true,
-				timestamp: Date.now(),
-			},
-			{
-				role: "toolResult",
-				toolCallId: "toolu_04b",
-				toolName: "browser_screenshot",
-				content: [
-					{ type: "text", text: "Screenshot captured" },
-					{ ...TEST_IMAGE },
-				],
+				toolCallId: "tool-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "done" }],
 				isError: false,
 				timestamp: Date.now(),
 			},
-			{
-				role: "toolResult",
-				toolCallId: "toolu_04c",
-				toolName: "browser_navigate",
-				content: [
-					{ type: "text", text: "Navigation failed: net::ERR_ABORTED" },
-					{ ...TEST_IMAGE },
-				],
-				isError: true,
-				timestamp: Date.now(),
-			},
+			{ role: "user", content: "Continue", timestamp: Date.now() },
 		];
 
 		const payload = await capturePayload({ messages });
-		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: any[] }> };
-		expect(p.messages).toHaveLength(2);
-
-		const content = p.messages[1].content;
-		// Exact block order: toolResults first, then hoisted error images. A
-		// per-result hoist would interleave images and fail this assertion.
-		const kinds = content.map((b) => ("toolResult" in b ? "toolResult" : "image"));
-		expect(kinds).toEqual(["toolResult", "toolResult", "toolResult", "image", "image"]);
-
-		const toolResults = content.filter((b) => "toolResult" in b) as Array<{
-			toolResult: { toolUseId: string; status: string; content: any[] };
-		}>;
-		expect(toolResults.map((t) => t.toolResult.toolUseId)).toEqual([
-			"toolu_04a",
-			"toolu_04b",
-			"toolu_04c",
-		]);
-		expect(toolResults.map((t) => t.toolResult.status)).toEqual(["error", "success", "error"]);
-		for (const t of toolResults) {
-			const serialized = JSON.stringify(t.toolResult.content);
-			if (t.toolResult.status === "error") {
-				expect(serialized).not.toContain('"image"');
-			} else {
-				expect(serialized).toContain('"image"');
-			}
-		}
-		// Hoisted images carry the original bytes, in encounter order.
-		expect(Buffer.from(content[3].image.source.bytes).toString("base64")).toBe("dGVzdA==");
-		expect(Buffer.from(content[4].image.source.bytes).toString("base64")).toBe("dGVzdA==");
-	});
-
-	it("leaves error tool results without images unchanged", async () => {
-		const messages: Message[] = [
-			bedrockAssistantToolCall("toolu_03"),
-			{
-				role: "toolResult",
-				toolCallId: "toolu_03",
-				toolName: "browser_click",
-				content: [{ type: "text", text: "Click failed: timeout" }],
-				isError: true,
-				timestamp: Date.now(),
-			},
-		];
-
-		const payload = await capturePayload({ messages });
-		expect(payload).toBeDefined();
-		const p = payload as { messages: Array<{ role: string; content: any[] }> };
-		const content = p.messages[1].content;
-		expect(content).toHaveLength(1);
-		const tr = content[0].toolResult as { status: string; content: any[] };
-		expect(tr.status).toBe("error");
-		expect(tr.content).toEqual([{ text: "Click failed: timeout" }]);
+		const p = payload as {
+			messages: Array<{ content: Array<{ toolUse?: { input: unknown } }> }>;
+		};
+		expect(p.messages[0].content[0].toolUse?.input).toEqual({
+			path: "/workspace/foobar/file.js",
+			edits: [
+				{ oldText: "first", newText: "updated first" },
+				{ oldText: "second", newText: "updated second" },
+			],
+		});
+		expect(toolArguments.edits[1]).toEqual({ oldText: "second", newText: "updated second", "": "" });
 	});
 });

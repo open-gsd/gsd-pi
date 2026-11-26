@@ -1,11 +1,16 @@
 import { homedir } from "node:os";
 import * as path from "node:path";
-import { type AutocompleteProvider, CombinedAutocompleteProvider, Container } from "@earendil-works/pi-tui";
+import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@gsd/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
-import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
-import type { SourceInfo } from "../src/core/source-info.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { type Component, Container, type Focusable, type OverlayHandle, type TUI } from "../../tui/src/tui.js";
+import { TuiMainScreen } from "../../tui/src/tui-main-screen.js";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
+import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
+import type { QuietStartup } from "../src/core/settings-manager.js";
+import type { SourceInfo } from "../src/core/source-info.js";
+import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.js";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -15,6 +20,41 @@ function renderLastLine(container: Container, width = 120): string {
 
 function renderAll(container: Container, width = 120): string {
 	return container.children.flatMap((child) => child.render(width)).join("\n");
+}
+
+class TestFocusableComponent implements Component, Focusable {
+	focused = false;
+	inputs: string[] = [];
+	private readonly label: string;
+	private text = "";
+
+	constructor(label: string) {
+		this.label = label;
+	}
+
+	handleInput(data: string): void {
+		this.inputs.push(data);
+	}
+
+	getText(): string {
+		return this.text;
+	}
+
+	setText(text: string): void {
+		this.text = text;
+	}
+
+	render(): string[] {
+		return [this.label];
+	}
+
+	invalidate(): void {}
+}
+
+async function flushTui(tui: TUI, terminal: VirtualTerminal): Promise<void> {
+	tui.requestRender(true);
+	await Promise.resolve();
+	await terminal.waitForRender();
 }
 
 function normalizeRenderedOutput(container: Container, width = 220): string {
@@ -79,24 +119,159 @@ describe("InteractiveMode.showStatus", () => {
 	});
 });
 
+describe("InteractiveMode.showManagedToolStatus", () => {
+	beforeAll(() => initTheme("dark"));
+
+	test("renders tool updates as one contiguous group", () => {
+		const fakeThis: any = {
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			managedToolStatusStarted: false,
+			lastStatusSpacer: undefined,
+			lastStatusText: undefined,
+		};
+		const showManagedToolStatus = (InteractiveMode as any).prototype.showManagedToolStatus;
+
+		showManagedToolStatus.call(fakeThis, { type: "info", message: "fd downloading" });
+		showManagedToolStatus.call(fakeThis, { type: "info", message: "rg downloading" });
+		showManagedToolStatus.call(fakeThis, { type: "warning", message: "rg failed" });
+
+		expect(fakeThis.chatContainer.children).toHaveLength(4);
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe(
+			"fd downloading\n rg downloading\n Warning: rg failed",
+		);
+	});
+});
+
 describe("InteractiveMode.setToolsExpanded", () => {
 	test("applies expansion state to the active header and chat entries", () => {
 		const header = { setExpanded: vi.fn() };
+		const loadedResourcesChild = { setExpanded: vi.fn() };
 		const chatChild = { setExpanded: vi.fn() };
 		const fakeThis: any = {
 			toolOutputExpanded: false,
 			customHeader: undefined,
 			builtInHeader: header,
+			loadedResourcesContainer: { children: [loadedResourcesChild] },
 			chatContainer: { children: [chatChild] },
+			pendingMessagesContainer: { children: [] },
 			ui: { requestRender: vi.fn() },
+			showStatus: vi.fn(),
 		};
 
 		(InteractiveMode as any).prototype.setToolsExpanded.call(fakeThis, true);
 
 		expect(fakeThis.toolOutputExpanded).toBe(true);
 		expect(header.setExpanded).toHaveBeenCalledWith(true);
+		expect(loadedResourcesChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
-		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Tool output: expanded");
+	});
+});
+
+// Regression tests for https://github.com/earendil-works/pi/issues/11875
+describe("InteractiveMode pending user bash output", () => {
+	function createPendingBashComponent() {
+		return { render: () => [], invalidate: () => {}, setExpanded: vi.fn() };
+	}
+
+	function createContext(pendingBashComponents: ReturnType<typeof createPendingBashComponent>[]) {
+		const pendingMessagesContainer = new Container();
+		for (const component of pendingBashComponents) pendingMessagesContainer.addChild(component);
+		const fakeThis: any = {
+			isInitialized: true,
+			toolOutputExpanded: false,
+			loadedResourcesContainer: new Container(),
+			chatContainer: new Container(),
+			pendingMessagesContainer,
+			pendingBashComponents,
+			compactionQueuedMessages: [],
+			session: { getSteeringMessages: () => ["steer"], getFollowUpMessages: () => [] },
+			footer: { invalidate: vi.fn() },
+			programStatus: { handleEvent: vi.fn() },
+			ui: { requestRender: vi.fn() },
+			showStatus: vi.fn(),
+			checkShutdownRequested: vi.fn(async () => {}),
+			getAppKeyDisplay: () => "alt+up",
+		};
+		for (const name of [
+			"setToolsExpanded",
+			"updatePendingMessagesDisplay",
+			"getAllQueuedMessages",
+			"flushPendingBashComponents",
+			"handleEvent",
+		]) {
+			fakeThis[name] = (InteractiveMode as any).prototype[name].bind(fakeThis);
+		}
+		return fakeThis;
+	}
+
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	test("ctrl+o expands user bash output in the pending area", () => {
+		const component = createPendingBashComponent();
+		const fakeThis = createContext([component]);
+
+		fakeThis.setToolsExpanded(true);
+
+		expect(component.setExpanded).toHaveBeenCalledWith(true);
+	});
+
+	test("queued message updates keep user bash output in the pending area", () => {
+		const component = createPendingBashComponent();
+		const fakeThis = createContext([component]);
+
+		fakeThis.updatePendingMessagesDisplay();
+		fakeThis.setToolsExpanded(true);
+
+		expect(fakeThis.pendingMessagesContainer.children).toContain(component);
+		expect(renderAll(fakeThis.pendingMessagesContainer)).toContain("Steering: steer");
+		expect(component.setExpanded).toHaveBeenCalledWith(true);
+	});
+
+	test("settling the agent run moves user bash output to the chat", async () => {
+		const component = createPendingBashComponent();
+		const fakeThis = createContext([component]);
+
+		await fakeThis.handleEvent({ type: "agent_settled", aborted: false });
+
+		expect(fakeThis.pendingMessagesContainer.children).not.toContain(component);
+		expect(fakeThis.chatContainer.children).toEqual([component]);
+		expect(fakeThis.pendingBashComponents).toEqual([]);
+	});
+});
+
+// Regression test for https://github.com/earendil-works/pi/issues/12426
+describe("InteractiveMode rebuilt user bash output", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	test.each([true, false])("follows ctrl+o state %s when rebuilt from the session", (expanded) => {
+		const fakeThis: any = {
+			toolOutputExpanded: expanded,
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			outputPad: 1,
+		};
+		const output = Array.from({ length: 40 }, (_, i) => `line-${i + 1}`).join("\n");
+
+		(InteractiveMode as any).prototype.addMessageToChat.call(fakeThis, {
+			role: "bashExecution",
+			command: "seq 1 40",
+			output,
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			timestamp: Date.now(),
+		});
+
+		const rendered = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(rendered).toContain("line-40");
+		expect(rendered.includes("line-1\n")).toBe(expanded);
+		expect(rendered.includes("to expand")).toBe(!expanded);
 	});
 });
 
@@ -114,6 +289,13 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 		const fakeThis: any = {
 			session: { settingsManager },
 			settingsManager,
+			themeController: {
+				setThemeInstance: vi.fn(() => ({ success: true })),
+				setThemeName: vi.fn(() => {
+					fakeThis.ui.requestRender();
+					return { success: true };
+				}),
+			},
 			ui: { requestRender: vi.fn() },
 		};
 
@@ -121,6 +303,7 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 		const result = uiContext.setTheme("light");
 
 		expect(result.success).toBe(true);
+		expect(fakeThis.themeController.setThemeName).toHaveBeenCalledWith("light");
 		expect(settingsManager.setTheme).toHaveBeenCalledWith("light");
 		expect(currentTheme).toBe("light");
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
@@ -136,6 +319,10 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 		const fakeThis: any = {
 			session: { settingsManager },
 			settingsManager,
+			themeController: {
+				setThemeInstance: vi.fn(() => ({ success: true })),
+				setThemeName: vi.fn(() => ({ success: false, error: "Theme not found" })),
+			},
 			ui: { requestRender: vi.fn() },
 		};
 
@@ -143,8 +330,245 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 		const result = uiContext.setTheme("__missing_theme__");
 
 		expect(result.success).toBe(false);
+		expect(fakeThis.themeController.setThemeName).toHaveBeenCalledWith("__missing_theme__");
 		expect(settingsManager.setTheme).not.toHaveBeenCalled();
 		expect(fakeThis.ui.requestRender).not.toHaveBeenCalled();
+	});
+});
+
+describe("InteractiveMode.showExtensionCustom", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	// Inline custom components go through the extension dialog stack.
+	const extensionDialogState = () => ({
+		extensionDialogs: [],
+		extensionOverlays: new Map(),
+		programStatus: { setBlocked: vi.fn() },
+		pushExtensionDialog: (InteractiveMode as any).prototype.pushExtensionDialog,
+		removeExtensionDialog: (InteractiveMode as any).prototype.removeExtensionDialog,
+		showTopExtensionDialog: (InteractiveMode as any).prototype.showTopExtensionDialog,
+	});
+
+	test("overlay custom UI reclaims input after non-overlay custom UI closes", async () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const ui: TUI = new TuiMainScreen(terminal);
+		const editorContainer = new Container();
+		const editor = new TestFocusableComponent("EDITOR");
+		const palette = new TestFocusableComponent("PALETTE");
+		const overlay = new TestFocusableComponent("OVERLAY");
+		const replacement = new TestFocusableComponent("REPLACEMENT");
+		let closeOverlay: (value: string) => void = () => {
+			throw new Error("closeOverlay was not initialized");
+		};
+		let closeReplacement: (value: string) => void = () => {
+			throw new Error("closeReplacement was not initialized");
+		};
+		const fakeThis = {
+			editor,
+			editorContainer,
+			keybindings: {},
+			ui,
+			disposeActiveSelector: vi.fn(),
+			...extensionDialogState(),
+		};
+		const showExtensionCustom = <T>(
+			factory: (tui: TUI, theme: unknown, keybindings: unknown, done: (result: T) => void) => Component,
+			options?: { overlay?: boolean },
+		): Promise<T> =>
+			(InteractiveMode as any).prototype.showExtensionCustom.call(fakeThis, factory, options) as Promise<T>;
+
+		editorContainer.addChild(editor);
+		ui.addChild(editorContainer);
+		ui.addChild(palette);
+		ui.setFocus(palette);
+		ui.start();
+		try {
+			const overlayPromise = showExtensionCustom<string>(
+				(_tui, _theme, _keybindings, done) => {
+					closeOverlay = done;
+					return overlay;
+				},
+				{ overlay: true },
+			);
+			await flushTui(ui, terminal);
+			expect(overlay.focused).toBe(true);
+
+			const replacementPromise = showExtensionCustom<string>((_tui, _theme, _keybindings, done) => {
+				closeReplacement = done;
+				return replacement;
+			});
+			await flushTui(ui, terminal);
+			expect(replacement.focused).toBe(true);
+
+			closeReplacement("done");
+			await replacementPromise;
+			await flushTui(ui, terminal);
+			terminal.sendInput("x");
+			await flushTui(ui, terminal);
+
+			expect(overlay.inputs).toEqual(["x"]);
+			expect(editor.inputs).toEqual([]);
+			expect(overlay.focused).toBe(true);
+
+			closeOverlay("closed");
+			await overlayPromise;
+		} finally {
+			ui.stop();
+		}
+	});
+
+	// Regression test for #10648: closing a lower overlay removed the topmost overlay instead.
+	test.each([
+		{ lowerKind: "capturing", nonCapturing: false },
+		{ lowerKind: "non-capturing", nonCapturing: true },
+	])(
+		"closing a lower $lowerKind overlay custom UI removes its own overlay, not the topmost one",
+		async ({ nonCapturing }) => {
+			const terminal = new VirtualTerminal(80, 24);
+			const ui: TUI = new TuiMainScreen(terminal);
+			const editorContainer = new Container();
+			const editor = new TestFocusableComponent("EDITOR");
+			const lower = new TestFocusableComponent("LOWER");
+			const upper = new TestFocusableComponent("UPPER");
+			let closeLower: (value: string) => void = () => {
+				throw new Error("closeLower was not initialized");
+			};
+			let closeUpper: (value: string) => void = () => {
+				throw new Error("closeUpper was not initialized");
+			};
+			const fakeThis = {
+				editor,
+				editorContainer,
+				keybindings: {},
+				ui,
+				disposeActiveSelector: vi.fn(),
+				...extensionDialogState(),
+			};
+			const showExtensionCustom = <T>(
+				factory: (tui: TUI, theme: unknown, keybindings: unknown, done: (result: T) => void) => Component,
+				options?: { overlay?: boolean; overlayOptions?: { nonCapturing?: boolean } },
+			): Promise<T> =>
+				(InteractiveMode as any).prototype.showExtensionCustom.call(fakeThis, factory, options) as Promise<T>;
+
+			editorContainer.addChild(editor);
+			ui.addChild(editorContainer);
+			ui.setFocus(editor);
+			ui.start();
+			try {
+				const lowerPromise = showExtensionCustom<string>(
+					(_tui, _theme, _keybindings, done) => {
+						closeLower = done;
+						return lower;
+					},
+					{ overlay: true, overlayOptions: { nonCapturing } },
+				);
+				await flushTui(ui, terminal);
+				const upperPromise = showExtensionCustom<string>(
+					(_tui, _theme, _keybindings, done) => {
+						closeUpper = done;
+						return upper;
+					},
+					{ overlay: true },
+				);
+				await flushTui(ui, terminal);
+				expect(upper.focused).toBe(true);
+
+				closeLower("lower closed");
+				await expect(lowerPromise).resolves.toBe("lower closed");
+				await flushTui(ui, terminal);
+
+				const viewport = terminal.getViewport().join("\n");
+				expect(viewport).toContain("UPPER");
+				expect(viewport).not.toContain("LOWER");
+				terminal.sendInput("x");
+				await flushTui(ui, terminal);
+				expect(upper.inputs).toEqual(["x"]);
+				expect(lower.inputs).toEqual([]);
+
+				closeUpper("upper closed");
+				await expect(upperPromise).resolves.toBe("upper closed");
+				await flushTui(ui, terminal);
+				expect(ui.hasOverlay()).toBe(false);
+				expect(editor.focused).toBe(true);
+			} finally {
+				ui.stop();
+			}
+		},
+	);
+
+	// Regression: reset hid only the topmost overlay, so lower extension overlays stayed and kept input.
+	test("resetExtensionUI removes every extension overlay but keeps pi's own overlays", async () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const ui: TUI = new TuiMainScreen(terminal);
+		const editorContainer = new Container();
+		const editor = new TestFocusableComponent("EDITOR");
+		const internal = new TestFocusableComponent("INTERNAL");
+		const lower = Object.assign(new TestFocusableComponent("LOWER"), { dispose: vi.fn() });
+		const hidden = Object.assign(new TestFocusableComponent("HIDDEN"), { dispose: vi.fn() });
+		const upper = Object.assign(new TestFocusableComponent("UPPER"), { dispose: vi.fn() });
+		const fakeThis = {
+			editor,
+			editorContainer,
+			keybindings: {},
+			ui,
+			disposeActiveSelector: vi.fn(),
+			...extensionDialogState(),
+			// The rest of resetExtensionUI is not under test here.
+			clearExtensionTerminalInputListeners: vi.fn(),
+			setExtensionFooter: vi.fn(),
+			setExtensionHeader: vi.fn(),
+			clearExtensionWidgets: vi.fn(),
+			footerDataProvider: { clearExtensionStatuses: vi.fn() },
+			footer: { invalidate: vi.fn() },
+			setCustomEditorComponent: vi.fn(),
+			setupAutocompleteProvider: vi.fn(),
+			defaultEditor: {},
+			updateTerminalTitle: vi.fn(),
+			setWorkingIndicator: vi.fn(),
+			setHiddenThinkingLabel: vi.fn(),
+		};
+		const showOverlay = (component: Component, onHandle?: (handle: OverlayHandle) => void): Promise<unknown> =>
+			(InteractiveMode as any).prototype.showExtensionCustom.call(fakeThis, () => component, {
+				overlay: true,
+				onHandle,
+			}) as Promise<unknown>;
+
+		editorContainer.addChild(editor);
+		ui.addChild(editorContainer);
+		ui.setFocus(editor);
+		ui.start();
+		try {
+			// A pi-internal overlay (for example the header easter egg) opened below the extension overlays.
+			ui.showOverlay(internal);
+			void showOverlay(lower);
+			void showOverlay(hidden, (handle) => handle.setHidden(true));
+			void showOverlay(upper);
+			await flushTui(ui, terminal);
+			expect(upper.focused).toBe(true);
+
+			(InteractiveMode as any).prototype.resetExtensionUI.call(fakeThis);
+			await flushTui(ui, terminal);
+
+			const viewport = terminal.getViewport().join("\n");
+			expect(viewport).toContain("INTERNAL");
+			expect(viewport).not.toContain("LOWER");
+			expect(viewport).not.toContain("UPPER");
+			expect(lower.dispose).toHaveBeenCalledOnce();
+			expect(hidden.dispose).toHaveBeenCalledOnce();
+			expect(upper.dispose).toHaveBeenCalledOnce();
+			terminal.sendInput("x");
+			await flushTui(ui, terminal);
+			expect(internal.inputs).toEqual(["x"]);
+			expect(lower.inputs).toEqual([]);
+
+			ui.hideOverlay();
+			expect(ui.hasOverlay()).toBe(false);
+			expect(editor.focused).toBe(true);
+		} finally {
+			ui.stop();
+		}
 	});
 });
 
@@ -215,19 +639,166 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 		expect(provider.shouldTriggerFileCompletion?.(["foo"], 0, 3)).toBe(true);
 		expect(calls).toEqual(["shouldTrigger:wrap2", "shouldTrigger:wrap1"]);
 	});
+
+	test("merges triggerCharacters from wrapper factories", () => {
+		const defaultEditor = { setAutocompleteProvider: vi.fn() };
+		const customEditor = { setAutocompleteProvider: vi.fn() };
+		const passThrough =
+			(triggerCharacters: string[]): AutocompleteProviderFactory =>
+			(current) => ({
+				triggerCharacters,
+				getSuggestions: (lines, cursorLine, cursorCol, options) =>
+					current.getSuggestions(lines, cursorLine, cursorCol, options),
+				applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
+					current.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+			});
+
+		const fakeThis = {
+			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
+			defaultEditor,
+			editor: customEditor,
+			autocompleteProviderWrappers: [passThrough(["$"]), passThrough(["!"])],
+		};
+
+		(
+			InteractiveMode as unknown as {
+				prototype: { setupAutocompleteProvider: (this: typeof fakeThis) => void };
+			}
+		).prototype.setupAutocompleteProvider.call(fakeThis);
+
+		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
+		expect(provider.triggerCharacters).toEqual(["$", "!"]);
+	});
 });
 
+describe("InteractiveMode.createBaseAutocompleteProvider", () => {
+	test("matches model command arguments across provider/model order", async () => {
+		type TestModel = { id: string; provider: string; name: string };
+		type FakeInteractiveMode = {
+			session: {
+				scopedModels: Array<{ model: TestModel }>;
+				modelRuntime: { getAvailableSnapshot: () => TestModel[] };
+				promptTemplates: [];
+				extensionRunner: { getRegisteredCommands: () => [] };
+				resourceLoader: { getSkills: () => { skills: [] } };
+			};
+			settingsManager: { getEnableSkillCommands: () => boolean };
+			skillCommands: Map<string, string>;
+			sessionManager: { getCwd: () => string };
+			fdPath: null;
+		};
+
+		const createBaseAutocompleteProvider = (
+			InteractiveMode as unknown as {
+				prototype: { createBaseAutocompleteProvider(this: FakeInteractiveMode): AutocompleteProvider };
+			}
+		).prototype.createBaseAutocompleteProvider;
+		const models = [
+			{ id: "gpt-5.2-codex", provider: "github-copilot", name: "GPT-5.2 Codex" },
+			{ id: "gpt-5.5", provider: "openai-codex", name: "GPT-5.5" },
+		];
+		const fakeThis: FakeInteractiveMode = {
+			session: {
+				scopedModels: [],
+				modelRuntime: { getAvailableSnapshot: () => models },
+				promptTemplates: [],
+				extensionRunner: { getRegisteredCommands: () => [] },
+				resourceLoader: { getSkills: () => ({ skills: [] }) },
+			},
+			settingsManager: { getEnableSkillCommands: () => false },
+			skillCommands: new Map(),
+			sessionManager: { getCwd: () => "/tmp" },
+			fdPath: null,
+		};
+
+		const provider = createBaseAutocompleteProvider.call(fakeThis);
+		const line = "/model codexgpt";
+		const suggestions = await provider.getSuggestions([line], 0, line.length, {
+			signal: new AbortController().signal,
+		});
+
+		expect(suggestions?.items.map((item) => item.value)).toEqual([
+			"openai-codex/gpt-5.5",
+			"github-copilot/gpt-5.2-codex",
+		]);
+	});
+
+	test("matches login command arguments by provider id and name", async () => {
+		type FakeInteractiveMode = {
+			session: {
+				scopedModels: [];
+				modelRuntime: { getAvailableSnapshot: () => [] };
+				promptTemplates: [];
+				extensionRunner: { getRegisteredCommands: () => [] };
+				resourceLoader: { getSkills: () => { skills: [] } };
+			};
+			settingsManager: { getEnableSkillCommands: () => boolean };
+			skillCommands: Map<string, string>;
+			sessionManager: { getCwd: () => string };
+			fdPath: null;
+			getLoginProviderOptions: () => AuthSelectorProvider[];
+		};
+
+		const createBaseAutocompleteProvider = (
+			InteractiveMode as unknown as {
+				prototype: { createBaseAutocompleteProvider(this: FakeInteractiveMode): AutocompleteProvider };
+			}
+		).prototype.createBaseAutocompleteProvider;
+		const fakeThis: FakeInteractiveMode = {
+			session: {
+				scopedModels: [],
+				modelRuntime: { getAvailableSnapshot: () => [] },
+				promptTemplates: [],
+				extensionRunner: { getRegisteredCommands: () => [] },
+				resourceLoader: { getSkills: () => ({ skills: [] }) },
+			},
+			settingsManager: { getEnableSkillCommands: () => false },
+			skillCommands: new Map(),
+			sessionManager: { getCwd: () => "/tmp" },
+			fdPath: null,
+			getLoginProviderOptions: () => [
+				{ id: "anthropic", name: "Anthropic", authType: "oauth", subscription: true },
+				{ id: "anthropic", name: "Anthropic", authType: "api_key", subscription: true },
+				{ id: "openai", name: "OpenAI", authType: "api_key" },
+				{ id: "radius", name: "Radius", authType: "oauth", subscription: false },
+			],
+		};
+
+		const provider = createBaseAutocompleteProvider.call(fakeThis);
+		const line = "/login subscription anthrop";
+		const suggestions = await provider.getSuggestions([line], 0, line.length, {
+			signal: new AbortController().signal,
+		});
+
+		expect(suggestions?.items).toEqual([
+			{
+				value: "anthropic",
+				label: "anthropic",
+				description: "Anthropic · subscription/API key",
+			},
+		]);
+
+		// OAuth sign-in without a subscription, such as Radius, is an account.
+		const radiusLine = "/login radius";
+		const radiusSuggestions = await provider.getSuggestions([radiusLine], 0, radiusLine.length, {
+			signal: new AbortController().signal,
+		});
+		expect(radiusSuggestions?.items).toEqual([{ value: "radius", label: "radius", description: "Radius · account" }]);
+	});
+});
 describe("InteractiveMode.showLoadedResources", () => {
 	beforeAll(() => {
 		initTheme("dark");
 	});
 
 	function createShowLoadedResourcesThis(options: {
-		quietStartup: boolean;
+		quietStartup: QuietStartup;
 		verbose?: boolean;
 		toolOutputExpanded?: boolean;
 		cwd?: string;
 		contextFiles?: Array<{ path: string; content?: string }>;
+		systemPromptSource?: { path: string };
+		appendSystemPromptSources?: Array<{ path: string }>;
 		extensions?: ExtensionFixture[];
 		skills?: Array<{ filePath: string; name: string }>;
 		skillDiagnostics?: Array<{ type: "warning" | "error" | "collision"; message: string }>;
@@ -236,6 +807,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		const fakeThis: any = {
 			options: { verbose: options.verbose ?? false },
 			toolOutputExpanded: options.toolOutputExpanded ?? false,
+			loadedResourcesContainer: new Container(),
 			chatContainer: new Container(),
 			settingsManager: {
 				getQuietStartup: () => options.quietStartup,
@@ -252,6 +824,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 				resourceLoader: {
 					getPathMetadata: () => new Map(),
 					getAgentsFiles: () => ({ agentsFiles: options.contextFiles ?? [] }),
+					getSystemPromptSource: () => options.systemPromptSource,
+					getAppendSystemPromptSources: () => options.appendSystemPromptSources ?? [],
 					getSkills: () => ({
 						skills: options.skills ?? [],
 						diagnostics: options.skillDiagnostics ?? [],
@@ -266,6 +840,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 				(InteractiveMode as any).prototype.formatExtensionDisplayPath.call(fakeThis, p),
 			formatContextPath: (p: string) => (InteractiveMode as any).prototype.formatContextPath.call(fakeThis, p),
 			getStartupExpansionState: () => (InteractiveMode as any).prototype.getStartupExpansionState.call(fakeThis),
+			shouldShowStartupDetails: () => (InteractiveMode as any).prototype.shouldShowStartupDetails.call(fakeThis),
 			buildScopeGroups: () => [],
 			formatScopeGroups: () => "resource-list",
 			isPackageSource: (sourceInfo?: SourceInfo) =>
@@ -414,7 +989,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer);
+		const output = renderAll(fakeThis.loadedResourcesContainer);
 		expect(output).toContain("[Skills]");
 		expect(output).toContain("commit");
 		expect(output).not.toContain("resource-list");
@@ -431,7 +1006,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer);
+		const output = renderAll(fakeThis.loadedResourcesContainer);
 		expect(output).toContain("[Skills]");
 		expect(output).toContain("resource-list");
 		expect(output).not.toContain("commit");
@@ -449,7 +1024,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer);
+		const output = renderAll(fakeThis.loadedResourcesContainer);
 		expect(output).toContain("[Skills]");
 		expect(output).toContain("resource-list");
 		expect(output).not.toContain("commit");
@@ -465,7 +1040,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer);
+		const output = renderAll(fakeThis.loadedResourcesContainer);
 		expect(output).toContain("[Extensions]");
 		expect(output).toContain("answer.ts, btw.ts");
 		expect(output).not.toContain("extensions/answer.ts");
@@ -482,7 +1057,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   @scope/pi-scoped, answer.ts, cli-extension.ts, HazAT/pi-interactive-subagents, HazAT/pi-interactive-subagents:subagents, local-index, pi-markdown-preview, user-index"`);
 	});
@@ -528,7 +1103,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   alpha/one, beta/one, gamma/one"`);
 	});
@@ -556,7 +1131,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   plan-mode"`);
 	});
@@ -584,7 +1159,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   plan-mode"`);
 	});
@@ -621,7 +1196,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   plan-mode, webfetch.ts"`);
 	});
@@ -658,7 +1233,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   bar, foo"`);
 	});
@@ -695,7 +1270,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   alpha/tools, beta/tools"`);
 	});
@@ -723,7 +1298,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   main.ts"`);
 	});
@@ -751,10 +1326,88 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   pi-markdown-preview"`);
 	});
+
+	test("labels npm sibling extensions relative to the declaring package", () => {
+		const extensions: ExtensionFixture[] = [
+			{
+				path: "/tmp/project/.pi/npm/node_modules/primary-package/index.ts",
+				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/primary-package/index.ts", {
+					source: "npm:primary-package",
+					scope: "project",
+					origin: "package",
+					baseDir: "/tmp/project/.pi/npm/node_modules/primary-package",
+				}),
+			},
+			{
+				path: "/tmp/project/.pi/npm/node_modules/sibling-package/index.ts",
+				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/sibling-package/index.ts", {
+					source: "npm:primary-package",
+					scope: "project",
+					origin: "package",
+					baseDir: "/tmp/project/.pi/npm/node_modules/primary-package",
+				}),
+			},
+		];
+
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: false,
+			extensions,
+			useRealScopeGroups: true,
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
+"[Extensions]
+  primary-package, primary-package:../sibling-package"`);
+	});
+
+	test("labels Windows npm sibling extensions relative to the declaring package", () => {
+		const primaryPath = "C:\\Users\\me\\.pi\\agent\\npm\\node_modules\\primary-package\\index.ts";
+		const siblingPath = "C:\\Users\\me\\.pi\\agent\\npm\\node_modules\\sibling-package\\index.ts";
+		const baseDir = "C:\\Users\\me\\.pi\\agent\\npm\\node_modules\\primary-package";
+		const extensions: ExtensionFixture[] = [
+			{
+				path: primaryPath,
+				sourceInfo: createSourceInfo(primaryPath, {
+					source: "npm:primary-package",
+					scope: "user",
+					origin: "package",
+					baseDir,
+				}),
+			},
+			{
+				path: siblingPath,
+				sourceInfo: createSourceInfo(siblingPath, {
+					source: "npm:primary-package",
+					scope: "user",
+					origin: "package",
+					baseDir,
+				}),
+			},
+		];
+
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: false,
+			extensions,
+			useRealScopeGroups: true,
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
+"[Extensions]
+  primary-package, primary-package:../sibling-package"`);
+	});
+
 	test("captures mixed extension layouts in expanded output", () => {
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: false,
@@ -767,7 +1420,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
 "[Extensions]
   project
     /tmp/project/.pi/extensions/answer.ts
@@ -798,10 +1451,29 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
+		const output = renderAll(fakeThis.loadedResourcesContainer).replace(/\\/g, "/");
 		expect(output).toContain("[Context]");
 		expect(output).toContain("~/.pi/agent/AGENTS.md, AGENTS.md");
 		expect(output).not.toContain(`${cwd.replace(/\\/g, "/")}/AGENTS.md`);
+	});
+
+	test("shows system prompt context paths before project context files", () => {
+		const cwd = "/tmp/project";
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: false,
+			cwd,
+			systemPromptSource: { path: path.join(cwd, ".pi", "SYSTEM.md") },
+			appendSystemPromptSources: [{ path: path.join(cwd, ".pi", "APPEND_SYSTEM.md") }],
+			contextFiles: [{ path: path.join(cwd, "AGENTS.md") }],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		const output = renderAll(fakeThis.loadedResourcesContainer).replace(/\\/g, "/");
+		expect(output).toContain("[Context]");
+		expect(output).toContain(".pi/SYSTEM.md, .pi/APPEND_SYSTEM.md, AGENTS.md");
 	});
 
 	test("shows full context paths when expanded", () => {
@@ -818,7 +1490,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
+		const output = renderAll(fakeThis.loadedResourcesContainer).replace(/\\/g, "/");
 		expect(output).toContain("[Context]");
 		expect(output).toContain("~/.pi/agent/AGENTS.md");
 		expect(output).toContain("~/Development/pi-mono/AGENTS.md");
@@ -837,7 +1509,29 @@ describe("InteractiveMode.showLoadedResources", () => {
 			showDiagnosticsWhenQuiet: true,
 		});
 
-		expect(fakeThis.chatContainer.children).toHaveLength(0);
+		expect(fakeThis.loadedResourcesContainer.children).toHaveLength(0);
+	});
+
+	test("hides resource listing but keeps the startup header with header-only quiet startup", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: "header",
+			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+		});
+
+		expect(fakeThis.loadedResourcesContainer.children).toHaveLength(0);
+		expect((InteractiveMode as any).prototype.shouldShowStartupHeader.call(fakeThis)).toBe(true);
+		expect((InteractiveMode as any).prototype.shouldShowStartupDetails.call(fakeThis)).toBe(false);
+	});
+
+	test("hides the startup header with full quiet startup unless verbose", () => {
+		const quiet = createShowLoadedResourcesThis({ quietStartup: true });
+		expect((InteractiveMode as any).prototype.shouldShowStartupHeader.call(quiet)).toBe(false);
+		const verbose = createShowLoadedResourcesThis({ quietStartup: "header", verbose: true });
+		expect((InteractiveMode as any).prototype.shouldShowStartupDetails.call(verbose)).toBe(true);
 	});
 
 	test("still shows diagnostics on quiet startup when requested", () => {
@@ -852,8 +1546,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 			showDiagnosticsWhenQuiet: true,
 		});
 
-		const output = renderAll(fakeThis.chatContainer);
-		expect(output).toContain("[Skill conflicts]");
+		const output = renderAll(fakeThis.loadedResourcesContainer);
+		expect(output).toContain("[Skill warnings]");
 		expect(output).not.toContain("[Skills]");
 	});
 });

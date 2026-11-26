@@ -3,11 +3,42 @@ import {
 	getCapabilities,
 	getCellDimensions,
 	getImageDimensions,
+	getPngDimensions,
 	type ImageDimensions,
 	imageFallback,
 	renderImage,
 } from "../terminal-image.js";
 import type { Component } from "../tui.js";
+import { truncateToWidth } from "../utils.js";
+
+/**
+ * Converts base64 image data to base64 PNG data, or returns null if it cannot.
+ * Called synchronously during rendering.
+ */
+export type ImageTranscoder = (base64Data: string, mimeType: string) => string | null;
+
+let imageTranscoder: ImageTranscoder | undefined;
+// Backstop for callers that recreate Image instances. Keyed by source data, least recently used first.
+const pngCache = new Map<string, string | null>();
+
+/**
+ * Register the converter used for non-PNG images on Kitty-protocol terminals, which only accept PNG.
+ * Without one, such images render as text fallbacks.
+ */
+export function setImageTranscoder(transcoder: ImageTranscoder | undefined): void {
+	imageTranscoder = transcoder;
+	pngCache.clear();
+}
+
+function toPng(base64Data: string, mimeType: string): string | null {
+	if (!imageTranscoder) return null;
+	const cached = pngCache.get(base64Data);
+	const png = cached === undefined ? imageTranscoder(base64Data, mimeType) : cached;
+	pngCache.delete(base64Data);
+	pngCache.set(base64Data, png);
+	if (pngCache.size > 32) pngCache.delete(pngCache.keys().next().value!);
+	return png;
+}
 
 export interface ImageTheme {
 	fallbackColor: (str: string) => string;
@@ -28,10 +59,11 @@ export class Image implements Component {
 	private theme: ImageTheme;
 	private options: ImageOptions;
 	private imageId?: number;
+	/** Converted PNG data for Kitty. Failures are not stored so a later transcoder can retry. */
+	private pngData?: string;
 
 	private cachedLines?: string[];
 	private cachedWidth?: number;
-	private onDimensionsResolved?: (dimensions: ImageDimensions) => void;
 
 	constructor(
 		base64Data: string,
@@ -53,15 +85,12 @@ export class Image implements Component {
 		return this.imageId;
 	}
 
-	/** Get rendered dimensions (GSD compat). */
 	getDimensions(): ImageDimensions {
 		return this.dimensions;
 	}
 
-	/** Register callback when async dimension resolution completes (GSD compat). */
-	setOnDimensionsResolved(callback: (dimensions: ImageDimensions) => void): void {
-		this.onDimensionsResolved = callback;
-		callback(this.dimensions);
+	setOnDimensionsResolved(_callback: (dimensions: ImageDimensions) => void): void {
+		// GSD host compat: dimensions are resolved synchronously in v1.6.1.
 	}
 
 	invalidate(): void {
@@ -69,7 +98,7 @@ export class Image implements Component {
 		this.cachedWidth = undefined;
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		if (this.cachedLines && this.cachedWidth === width) {
 			return this.cachedLines;
 		}
@@ -80,13 +109,21 @@ export class Image implements Component {
 		const maxHeight = this.options.maxHeightCells ?? defaultMaxHeight;
 
 		const caps = getCapabilities();
+		let data: string | null = this.base64Data;
+		let dimensions = this.dimensions;
+		if (caps.images === "kitty" && this.mimeType !== "image/png") {
+			this.pngData ??= toPng(this.base64Data, this.mimeType) ?? undefined;
+			data = this.pngData ?? null;
+			// Conversion may apply EXIF rotation, so prefer the PNG's own dimensions.
+			if (data) dimensions = getPngDimensions(data) ?? dimensions;
+		}
 		let lines: string[];
 
-		if (caps.images) {
+		if (caps.images && data) {
 			if (caps.images === "kitty" && this.imageId === undefined) {
 				this.imageId = allocateImageId();
 			}
-			const result = renderImage(this.base64Data, this.dimensions, {
+			const result = renderImage(data, dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: maxHeight,
 				imageId: this.imageId,
@@ -123,11 +160,11 @@ export class Image implements Component {
 				}
 			} else {
 				const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
-				lines = [this.theme.fallbackColor(fallback)];
+				lines = [truncateToWidth(this.theme.fallbackColor(fallback), width)];
 			}
 		} else {
 			const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
-			lines = [this.theme.fallbackColor(fallback)];
+			lines = [truncateToWidth(this.theme.fallbackColor(fallback), width)];
 		}
 
 		this.cachedLines = lines;

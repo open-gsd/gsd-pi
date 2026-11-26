@@ -1,6 +1,5 @@
-import { getKeybindings } from "../keybindings.js";
-import type { MouseEvent } from "../mouse.js";
-import type { Component } from "../tui.js";
+import { getKeybindings, getSelectPageIndex } from "../keybindings.js";
+import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.js";
 import { truncateToWidth, visibleWidth } from "../utils.js";
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
@@ -39,17 +38,14 @@ export interface SelectListLayoutOptions {
 }
 
 export class SelectList implements Component {
+	readonly capturesViewportInput: boolean = true;
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
 	private selectedIndex: number = 0;
+	private mousePressedIndex: number | undefined;
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
-
-	// First item index and item count of the most recently rendered window,
-	// used to map a clicked row back to an item.
-	private viewStartIndex = 0;
-	private viewItemCount = 0;
 
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
@@ -65,11 +61,8 @@ export class SelectList implements Component {
 
 	setFilter(filter: string): void {
 		this.filteredItems = this.items.filter((item) => item.value.toLowerCase().startsWith(filter.toLowerCase()));
-		// Reset selection when filter changes; clamp so empty lists never leave a stale index.
-		this.selectedIndex =
-			this.filteredItems.length === 0
-				? 0
-				: clamp(this.selectedIndex, 0, this.filteredItems.length - 1);
+		// Reset selection when filter changes
+		this.selectedIndex = 0;
 	}
 
 	setSelectedIndex(index: number): void {
@@ -92,16 +85,7 @@ export class SelectList implements Component {
 		const primaryColumnWidth = this.getPrimaryColumnWidth();
 
 		// Calculate visible range with scrolling
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
-
-		// Record the visible window so handleMouse can map rows to items.
-		// Items occupy rows 0..(count-1); the optional scroll indicator follows.
-		this.viewStartIndex = startIndex;
-		this.viewItemCount = endIndex - startIndex;
+		const { startIndex, endIndex } = this.getVisibleRange();
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {
@@ -123,8 +107,45 @@ export class SelectList implements Component {
 		return lines;
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (this.filteredItems.length === 0) return undefined;
+		if (event.type === "wheel" && event.wheelDelta) {
+			const delta = event.wheelDelta < 0 ? -1 : 1;
+			const previousIndex = this.selectedIndex;
+			this.selectedIndex = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + delta));
+			if (this.selectedIndex !== previousIndex) this.notifySelectionChange();
+			return { handled: true, render: this.selectedIndex !== previousIndex };
+		}
+		// Hover must not change selection: the visible range is centered on it.
+		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
+		const { startIndex, endIndex } = this.getVisibleRange();
+		const itemIndex = startIndex + event.y;
+		if (itemIndex < startIndex || itemIndex >= endIndex) return undefined;
+
+		if (event.type === "press") {
+			this.mousePressedIndex = itemIndex;
+			if (this.selectedIndex !== itemIndex) {
+				this.selectedIndex = itemIndex;
+				this.notifySelectionChange();
+			}
+			return { handled: true, focus: true };
+		}
+		if (event.type === "click") {
+			const clickedIndex = this.mousePressedIndex ?? itemIndex;
+			this.mousePressedIndex = undefined;
+			const changed = this.selectedIndex !== clickedIndex;
+			this.selectedIndex = clickedIndex;
+			if (changed) this.notifySelectionChange();
+			const selectedItem = this.filteredItems[this.selectedIndex];
+			if (selectedItem) this.onSelect?.(selectedItem);
+			return { handled: true };
+		}
+		return undefined;
+	}
+
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
+		const pageIndex = getSelectPageIndex(kb, keyData, this.selectedIndex, this.filteredItems.length, this.maxVisible);
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
@@ -133,6 +154,12 @@ export class SelectList implements Component {
 		// Down arrow - wrap to top when at bottom
 		else if (kb.matches(keyData, "tui.select.down")) {
 			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.notifySelectionChange();
+		}
+		// Page up/down - move by one visible page, clamped to the list bounds
+		else if (pageIndex !== undefined) {
+			if (this.filteredItems.length === 0 || pageIndex === this.selectedIndex) return;
+			this.selectedIndex = pageIndex;
 			this.notifySelectionChange();
 		}
 		// Enter
@@ -150,36 +177,15 @@ export class SelectList implements Component {
 		}
 	}
 
-	handleMouse(event: MouseEvent): void {
-		if (this.filteredItems.length === 0) return;
-
-		// Wheel moves the selection (with wrap, matching arrow-key behavior).
-		if (event.button === "wheel-up") {
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
-			this.notifySelectionChange();
-			return;
-		}
-		if (event.button === "wheel-down") {
-			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
-			this.notifySelectionChange();
-			return;
-		}
-
-		// Left click on a visible row selects and confirms that item.
-		if (event.type === "press" && event.button === "left") {
-			const row = event.y;
-			if (row >= 0 && row < this.viewItemCount) {
-				const index = this.viewStartIndex + row;
-				const item = this.filteredItems[index];
-				if (item) {
-					this.selectedIndex = index;
-					this.notifySelectionChange();
-					if (this.onSelect) {
-						this.onSelect(item);
-					}
-				}
-			}
-		}
+	private getVisibleRange(): { startIndex: number; endIndex: number } {
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+		);
+		return {
+			startIndex,
+			endIndex: Math.min(startIndex + this.maxVisible, this.filteredItems.length),
+		};
 	}
 
 	private renderItem(
@@ -262,8 +268,6 @@ export class SelectList implements Component {
 	}
 
 	private notifySelectionChange(): void {
-		if (this.filteredItems.length === 0) return;
-		this.selectedIndex = clamp(this.selectedIndex, 0, this.filteredItems.length - 1);
 		const selectedItem = this.filteredItems[this.selectedIndex];
 		if (selectedItem && this.onSelectionChange) {
 			this.onSelectionChange(selectedItem);

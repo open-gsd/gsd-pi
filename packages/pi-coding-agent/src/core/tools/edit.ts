@@ -1,43 +1,29 @@
-import type { AgentTool } from "@gsd/pi-agent-core";
-import { Box, Container, Spacer, Text } from "@gsd/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
-import { renderDiff } from "../tool-ui/diff.js";
-import type { ToolDefinition } from "../extensions/types.js";
+import { splitBom } from "../../utils/text.js";
+import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import {
 	applyEditsToNormalizedContent,
-	computeEditsDiff,
-	detectLineEnding,
+	applyReplacementsToOriginal,
 	type Edit,
-	type EditDiffError,
-	type EditDiffResult,
-	generateDiffString,
-	generateUnifiedPatch,
+	generateEditDiff,
 	normalizeToLF,
-	restoreLineEndings,
-	stripBom,
 } from "./edit-diff.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
-import { getDisplayReason, invalidArgText, shortenPath, str } from "./render-utils.js";
-import { wrapToolDefinition } from "./tool-definition-wrapper.js";
-
-type EditPreview = EditDiffResult | EditDiffError;
-
-type EditRenderState = {
-	callComponent?: EditCallRenderComponent;
-};
+import { type EditRenderState, editRenderers } from "./renderers/edit.js";
+import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const replaceEditSchema = Type.Object(
 	{
 		oldText: Type.String({
 			description:
-				"Exact text for one targeted replacement. Must be unique in the original file and not overlap any other edits[].oldText in the same call.",
+				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
 		}),
 		newText: Type.String({ description: "Replacement text for this targeted edit." }),
 	},
-	{ additionalProperties: false },
+	{},
 );
 
 const editSchema = Type.Object(
@@ -45,13 +31,36 @@ const editSchema = Type.Object(
 		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
 		edits: Type.Array(replaceEditSchema, {
 			description:
-				"One or more targeted replacements, each matched against the original file (not incrementally). Merge changes that touch the same or nearby lines into a single edit rather than emitting overlapping or nested edits.",
+				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
 		}),
 	},
-	{ additionalProperties: false },
+	{},
 );
 
+export const editToolSystemPromptContribution = {
+	snippet: "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+	guidelines: [
+		"Use edit for targeted changes. Batch changes to one file in a single call.",
+		"Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.",
+	],
+} as const;
+
 export type EditToolInput = Static<typeof editSchema>;
+type LegacyEditToolInput = EditToolInput & {
+	oldText?: unknown;
+	newText?: unknown;
+};
+
+type SingleEditInput = { oldText: string; newText: string };
+
+function isSingleEditInput(value: unknown): value is SingleEditInput {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return false;
+	}
+
+	const edit = value as Record<string, unknown>;
+	return typeof edit.oldText === "string" && typeof edit.newText === "string";
+}
 
 export interface EditToolDetails {
 	/** Display-oriented diff of the changes made */
@@ -93,59 +102,29 @@ function prepareEditArguments(input: unknown): EditToolInput {
 
 	const args = input as Record<string, unknown>;
 
-	// Some models confuse the `edits` field name with a similar-sounding one
-	// (observed: `oldEntries`, `edit`). When the real `edits` field is absent
-	// but one of these aliases is present, treat it as `edits` before the
-	// recovery steps below run. This turns a confusing dual AJV error
-	// ("edits: must have required properties edits" + "root: must not have
-	// additional properties") into a single clear validation message, and
-	// recovers the call outright when the alias's value can be normalized
-	// into a real edits array or a single oldText/newText replacement.
-	if (args.edits === undefined) {
-		for (const alias of ["oldEntries", "edit"]) {
-			if (alias in args) {
-				args.edits = args[alias];
-				delete args[alias];
-				break;
-			}
-		}
-	}
-
-	// Some models leak a raw XML-style tool-call parameter wrapper into the
-	// (possibly alias-promoted) edits value instead of well-formed JSON, e.g.
-	//   oldEntries: "\n<parameter name=\"oldText\">ACTUAL OLD TEXT"
-	// alongside a well-formed top-level `newText`. Unwrap this specific shape
-	// into a plain `oldText` string so the existing oldText/newText fold-in
-	// below can still recover the call. Only unwrap when there is no real
-	// top-level oldText already, so a genuinely intended `oldText` never gets
-	// silently overwritten. The wrapper is not always well-formed (models
-	// have been observed to omit the closing tag), so the trailing
-	// `</parameter>` is optional.
-	if (typeof args.edits === "string" && typeof args.oldText !== "string") {
-		const wrapped = args.edits.match(/^\s*<parameter\s+name="old(?:Text|_text)">([\s\S]*?)(?:<\/parameter>\s*)?$/i);
-		if (wrapped) {
-			args.oldText = wrapped[1];
-			delete args.edits;
-		}
-	}
-
 	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array.
+	// Others send a single edit object instead of a one-element edits array.
 	if (typeof args.edits === "string") {
 		try {
 			const parsed = JSON.parse(args.edits);
-			if (Array.isArray(parsed)) args.edits = parsed;
+			if (Array.isArray(parsed)) {
+				args.edits = parsed;
+			} else if (isSingleEditInput(parsed)) {
+				args.edits = [parsed];
+			}
 		} catch {}
+	} else if (isSingleEditInput(args.edits)) {
+		args.edits = [args.edits];
 	}
 
-	const oldText = typeof args.oldText === "string" ? args.oldText : undefined;
-	const newText = typeof args.newText === "string" ? args.newText : undefined;
-	if (typeof oldText !== "string" || typeof newText !== "string") {
+	const legacy = args as LegacyEditToolInput;
+	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
 		return args as EditToolInput;
 	}
 
-	const edits = Array.isArray(args.edits) ? [...args.edits] : [];
-	edits.push({ oldText, newText });
-	const { oldText: _oldText, newText: _newText, ...rest } = args;
+	const edits = Array.isArray(legacy.edits) ? [...legacy.edits] : [];
+	edits.push({ oldText: legacy.oldText, newText: legacy.newText });
+	const { oldText: _oldText, newText: _newText, ...rest } = legacy;
 	return { ...rest, edits } as EditToolInput;
 }
 
@@ -156,172 +135,6 @@ function validateEditInput(input: EditToolInput): { path: string; edits: Edit[] 
 	return { path: input.path, edits: input.edits };
 }
 
-type RenderableEditArgs = {
-	path?: string;
-	file_path?: string;
-	edits?: Edit[];
-	oldText?: string;
-	newText?: string;
-};
-
-type EditToolResultLike = {
-	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-	details?: EditToolDetails;
-};
-
-type EditCallRenderComponent = Box & {
-	preview?: EditPreview;
-	previewArgsKey?: string;
-	previewPending?: boolean;
-	settledError?: boolean;
-};
-
-function createEditCallRenderComponent(): EditCallRenderComponent {
-	return Object.assign(new Box(1, 1, (text: string) => text), {
-		preview: undefined as EditPreview | undefined,
-		previewArgsKey: undefined as string | undefined,
-		previewPending: false,
-		settledError: false,
-	});
-}
-
-function getEditCallRenderComponent(state: EditRenderState, lastComponent: unknown): EditCallRenderComponent {
-	if (lastComponent instanceof Box) {
-		const component = lastComponent as EditCallRenderComponent;
-		state.callComponent = component;
-		return component;
-	}
-	if (state.callComponent) {
-		return state.callComponent;
-	}
-	const component = createEditCallRenderComponent();
-	state.callComponent = component;
-	return component;
-}
-
-function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
-	if (!args) {
-		return null;
-	}
-
-	const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : null;
-	if (!path) {
-		return null;
-	}
-
-	if (
-		Array.isArray(args.edits) &&
-		args.edits.length > 0 &&
-		args.edits.every((edit) => typeof edit?.oldText === "string" && typeof edit?.newText === "string")
-	) {
-		return { path, edits: args.edits };
-	}
-
-	if (typeof args.oldText === "string" && typeof args.newText === "string") {
-		return { path, edits: [{ oldText: args.oldText, newText: args.newText }] };
-	}
-
-	return null;
-}
-
-function formatEditCall(
-	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../theme/theme.js").theme,
-): string {
-	const invalidArg = invalidArgText(theme);
-	const rawPath = str(args?.file_path ?? args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath) : null;
-	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
-}
-
-function formatEditResult(
-	args: RenderableEditArgs | undefined,
-	preview: EditPreview | undefined,
-	result: EditToolResultLike,
-	theme: typeof import("../../theme/theme.js").theme,
-	isError: boolean,
-): string | undefined {
-	const rawPath = str(args?.file_path ?? args?.path);
-	const previewDiff = preview && !("error" in preview) ? preview.diff : undefined;
-	const previewError = preview && "error" in preview ? preview.error : undefined;
-	if (isError) {
-		const contentErrorText = result.content
-			.filter((c) => c.type === "text")
-			.map((c) => c.text || "")
-			.join("\n");
-		const errorText = getDisplayReason(result.details) ?? contentErrorText;
-		if (!errorText || errorText === previewError) {
-			return undefined;
-		}
-		return theme.fg("error", errorText);
-	}
-
-	const resultDiff = result.details?.diff;
-	if (resultDiff && resultDiff !== previewDiff) {
-		return renderDiff(resultDiff, { filePath: rawPath ?? undefined });
-	}
-
-	return undefined;
-}
-
-function getEditHeaderBg(
-	preview: EditPreview | undefined,
-	settledError: boolean | undefined,
-	theme: typeof import("../../theme/theme.js").theme,
-): (text: string) => string {
-	if (preview) {
-		if ("error" in preview) {
-			return (text: string) => theme.bg("toolErrorBg", text);
-		}
-		return (text: string) => theme.bg("toolSuccessBg", text);
-	}
-	if (settledError) {
-		return (text: string) => theme.bg("toolErrorBg", text);
-	}
-	return (text: string) => theme.bg("toolPendingBg", text);
-}
-
-function buildEditCallComponent(
-	component: EditCallRenderComponent,
-	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../theme/theme.js").theme,
-): EditCallRenderComponent {
-	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
-	component.clear();
-	component.addChild(new Text(formatEditCall(args, theme), 0, 0));
-
-	if (!component.preview) {
-		return component;
-	}
-
-	const body =
-		"error" in component.preview ? theme.fg("error", component.preview.error) : renderDiff(component.preview.diff);
-	component.addChild(new Spacer(1));
-	component.addChild(new Text(body, 0, 0));
-	return component;
-}
-
-function setEditPreview(
-	component: EditCallRenderComponent,
-	preview: EditPreview,
-	argsKey: string | undefined,
-): boolean {
-	const current = component.preview;
-	const changed =
-		current === undefined ||
-		("error" in current && "error" in preview
-			? current.error !== preview.error
-			: "error" in current !== "error" in preview) ||
-		(!("error" in current) &&
-			!("error" in preview) &&
-			(current.diff !== preview.diff || current.firstChangedLine !== preview.firstChangedLine));
-	component.preview = preview;
-	component.previewArgsKey = argsKey;
-	component.previewPending = false;
-	return changed;
-}
-
 export function createEditToolDefinition(
 	cwd: string,
 	options?: EditToolOptions,
@@ -330,19 +143,17 @@ export function createEditToolDefinition(
 	return {
 		name: "edit",
 		label: "edit",
-			description: "Edit a file using exact text replacement. Each edits[].oldText must match uniquely in the file.",
-		promptSnippet:
-			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
-		promptGuidelines: [
-			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls.",
-			"Keep each edits[].oldText as small as possible while still unique in the file.",
-		],
+		description:
+			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+		promptSnippet: editToolSystemPromptContribution.snippet,
+		promptGuidelines: [...editToolSystemPromptContribution.guidelines],
 		parameters: editSchema,
+		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,
-		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
+		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, ctx?: ExtensionContext) {
 			const { path, edits } = validateEditInput(input);
-			const absolutePath = resolveToCwd(path, cwd);
+			const absolutePath = resolveToCwd(path, ctx?.cwd || cwd);
 
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the
@@ -372,18 +183,24 @@ export function createEditToolDefinition(
 				throwIfAborted();
 
 				// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-				const { bom, text: content } = stripBom(rawContent);
-				const originalEnding = detectLineEnding(content);
+				const { bom, text: content } = splitBom(rawContent);
 				const normalizedContent = normalizeToLF(content);
-				const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+				const { baseContent, newContent, replacements } = applyEditsToNormalizedContent(
+					normalizedContent,
+					edits,
+					path,
+				);
+				// Diff before writing, so diff computation cannot fail after the write.
+				const editDiff = generateEditDiff(path, baseContent, newContent, replacements);
 				throwIfAborted();
 
-				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+				// Splice into the original text, so untouched lines keep their line endings. Without any CR
+				// the original is the normalized text, and the normalized result is already final.
+				const finalContent =
+					bom + (content === normalizedContent ? newContent : applyReplacementsToOriginal(content, replacements));
 				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 
-				const diffResult = generateDiffString(baseContent, newContent);
-				const patch = generateUnifiedPatch(path, baseContent, newContent);
 				return {
 					content: [
 						{
@@ -391,77 +208,14 @@ export function createEditToolDefinition(
 							text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
 						},
 					],
-					details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
+					details: editDiff,
 				};
 			});
 		},
-		renderCall(args, theme, context) {
-			const component = getEditCallRenderComponent(context.state, context.lastComponent);
-			const previewInput = getRenderablePreviewInput(args as RenderableEditArgs | undefined);
-			const argsKey = previewInput
-				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
-				: undefined;
-
-			if (component.previewArgsKey !== argsKey) {
-				component.preview = undefined;
-				component.previewArgsKey = argsKey;
-				component.previewPending = false;
-				component.settledError = false;
-			}
-
-			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
-				component.previewPending = true;
-				const requestKey = argsKey;
-				void computeEditsDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
-					if (component.previewArgsKey === requestKey) {
-						setEditPreview(component, preview, requestKey);
-						context.invalidate();
-					}
-				});
-			}
-
-			return buildEditCallComponent(component, args, theme);
-		},
-		renderResult(result, _options, theme, context) {
-			const callComponent = context.state.callComponent;
-			const previewInput = getRenderablePreviewInput(context.args as RenderableEditArgs | undefined);
-			const argsKey = previewInput
-				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
-				: undefined;
-			const typedResult = result as EditToolResultLike;
-			const resultDiff = !context.isError ? typedResult.details?.diff : undefined;
-			let changed = false;
-			if (callComponent) {
-				if (typeof resultDiff === "string") {
-					changed =
-						setEditPreview(
-							callComponent,
-							{ diff: resultDiff, firstChangedLine: typedResult.details?.firstChangedLine },
-							argsKey,
-						) || changed;
-				}
-				if (callComponent.settledError !== context.isError) {
-					callComponent.settledError = context.isError;
-					changed = true;
-				}
-				if (changed) {
-					buildEditCallComponent(callComponent, context.args as RenderableEditArgs | undefined, theme);
-				}
-			}
-
-			const output = formatEditResult(context.args, callComponent?.preview, typedResult, theme, context.isError);
-			const component = (context.lastComponent as Container | undefined) ?? new Container();
-			component.clear();
-			if (!output) {
-				return component;
-			}
-			component.addChild(new Spacer(1));
-			component.addChild(new Text(output, 1, 0));
-			return component;
-		},
+		...editRenderers,
 	};
 }
 
-export function createEditTool(cwd: string, options?: EditToolOptions): AgentTool<typeof editSchema> {
+export function createEditTool(cwd: string, options?: EditToolOptions): TypeBoxAgentTool<typeof editSchema> {
 	return wrapToolDefinition(createEditToolDefinition(cwd, options));
 }

@@ -78,7 +78,6 @@ export class AgentSessionNavigationModule {
 			this.host._cwd = options?.workspaceRoot ?? process.cwd();
 
 			this.host.sessionManager.newSession({
-				cwd: this.host._cwd,
 				parentSession: options?.parentSession,
 			});
 			this.host.agent.sessionId = this.host.sessionManager.getSessionId();

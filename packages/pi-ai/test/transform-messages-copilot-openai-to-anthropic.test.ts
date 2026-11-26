@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { transformMessages } from "../src/providers/transform-messages.ts";
-import { normalizeToolResultContent } from "../src/tool-result-content.ts";
-import type { AssistantMessage, Message, Model, ToolCall } from "../src/types.ts";
+import { transformMessages } from "../src/api/transform-messages.js";
+import type { AssistantMessage, Message, Model, ToolCall } from "../src/types.js";
 
 // Normalize function matching what anthropic.ts uses
 function anthropicNormalizeToolCallId(
@@ -48,46 +47,6 @@ function makeAssistantMessage(content: AssistantMessage["content"]): AssistantMe
 }
 
 describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
-	it("converts thinking blocks to plain text when source model differs", () => {
-		const model = makeCopilotClaudeModel();
-		const messages: Message[] = [
-			{ role: "user", content: "hello", timestamp: Date.now() },
-			{
-				role: "assistant",
-				content: [
-					{
-						type: "thinking",
-						thinking: "Let me think about this...",
-						thinkingSignature: "reasoning_content",
-					},
-					{ type: "text", text: "Hi there!" },
-				],
-				api: "openai-completions",
-				provider: "github-copilot",
-				model: "gpt-4o",
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "stop",
-				timestamp: Date.now(),
-			},
-		];
-
-		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
-		const assistantMsg = result.find((m) => m.role === "assistant") as AssistantMessage;
-
-		// Thinking block should be converted to text since models differ
-		const textBlocks = assistantMsg.content.filter((b) => b.type === "text");
-		const thinkingBlocks = assistantMsg.content.filter((b) => b.type === "thinking");
-		expect(thinkingBlocks).toHaveLength(0);
-		expect(textBlocks.length).toBeGreaterThanOrEqual(2);
-	});
-
 	it("removes thoughtSignature from tool calls when migrating between models", () => {
 		const model = makeCopilotClaudeModel();
 		const messages: Message[] = [
@@ -132,52 +91,6 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 		const toolCall = assistantMsg.content.find((b) => b.type === "toolCall") as ToolCall;
 
 		expect(toolCall.thoughtSignature).toBeUndefined();
-	});
-
-	it("hydrates missing tool result content before provider transforms", () => {
-		const model = makeCopilotClaudeModel();
-		const messages: Message[] = [
-			{
-				role: "toolResult",
-				toolCallId: "call_123",
-				toolName: "deathloop_run",
-				isError: false,
-				timestamp: Date.now(),
-			} as unknown as Message,
-		];
-
-		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
-		const toolResult = result[0];
-
-		expect(toolResult?.role).toBe("toolResult");
-		if (toolResult?.role === "toolResult") {
-			expect(toolResult.content).toEqual([{ type: "text", text: "" }]);
-		}
-	});
-
-	it("stringifies malformed non-json tool result content safely", () => {
-		expect(normalizeToolResultContent([])).toEqual([{ type: "text", text: "" }]);
-		expect(normalizeToolResultContent(["hello"])).toEqual([{ type: "text", text: "hello" }]);
-		const cyclicTextBlock = {
-			type: "text",
-			text: "ok",
-			cache_control: { type: "ephemeral" },
-		} as { type: "text"; text: string; cache_control: { type: "ephemeral" }; self?: unknown };
-		cyclicTextBlock.self = cyclicTextBlock;
-		expect(normalizeToolResultContent([cyclicTextBlock])).toEqual([
-			{ type: "text", text: "ok", cache_control: { type: "ephemeral" } },
-		]);
-		expect(normalizeToolResultContent(Symbol("bad"))).toEqual([{ type: "text", text: "Symbol(bad)" }]);
-		const functionContent = normalizeToolResultContent(() => undefined);
-		expect(functionContent[0]?.type).toBe("text");
-		expect(typeof functionContent[0]?.text).toBe("string");
-		expect(functionContent[0]?.text.length).toBeGreaterThan(0);
-
-		const unstringifiable = Object.create(null) as { self?: unknown };
-		unstringifiable.self = unstringifiable;
-		expect(normalizeToolResultContent(unstringifiable)).toEqual([
-			{ type: "text", text: "[unstringifiable tool result content]" },
-		]);
 	});
 
 	it("adds synthetic tool results for trailing orphaned tool calls", () => {

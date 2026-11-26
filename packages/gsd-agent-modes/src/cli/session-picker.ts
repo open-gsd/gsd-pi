@@ -2,7 +2,7 @@
  * TUI session selector for --resume flag
  */
 
-import { ProcessTerminal, TUI } from "@gsd/pi-tui";
+import { ProcessTerminal, TuiMainScreen } from "@gsd/pi-tui";
 import { KeybindingsManager } from "@gsd/agent-core";
 import type { SessionInfo, SessionListProgress } from "@gsd/pi-coding-agent/core/session-manager.js";
 import { SessionSelectorComponent } from "../modes/interactive/components/session-selector.js";
@@ -15,7 +15,7 @@ export async function selectSession(
 	allSessionsLoader: SessionsLoader,
 ): Promise<string | null> {
 	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal());
+		const ui = new TuiMainScreen(new ProcessTerminal());
 		const keybindings = KeybindingsManager.create();
 		let resolved = false;
 

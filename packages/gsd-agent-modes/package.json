@@ -30,6 +30,7 @@
     "@gsd/pi-ai": "workspace:*",
     "@gsd/pi-coding-agent": "workspace:*",
     "@gsd/pi-tui": "workspace:*",
+    "@gsd/native": "workspace:*",
     "@opengsd/contracts": "workspace:*",
     "chalk": "^5.5.0"
   }

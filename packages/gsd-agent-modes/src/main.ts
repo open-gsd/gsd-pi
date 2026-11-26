@@ -5,7 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { type ImageContent, modelsAreEqual, supportsXhigh } from "@gsd/pi-ai";
+import { type ImageContent, getSupportedThinkingLevels, modelsAreEqual } from "@gsd/pi-ai";
 import chalk from "chalk";
 import { createInterface } from "readline";
 import { type Args, parseArgs, printHelp } from "./cli/args.js";
@@ -200,14 +200,21 @@ async function probeDeferredProvidersForListModels(modelRegistry: ModelRegistry)
 		]);
 		if (!ollama?.probeAndRegister) return;
 
-		const pi: ProviderRegistryShim = {
-			registerProvider(name, config) {
-				modelRegistry.registerProvider(name, config);
+		const pi = {
+			registerProvider(
+				providerOrName: Parameters<ModelRegistry["registerProvider"]>[0],
+				config?: Parameters<ModelRegistry["registerProvider"]>[1],
+			): void {
+				if (typeof providerOrName === "string") {
+					modelRegistry.registerProvider(providerOrName, config!);
+					return;
+				}
+				modelRegistry.registerProvider(providerOrName);
 			},
 			unregisterProvider(name) {
 				modelRegistry.unregisterProvider(name);
 			},
-		};
+		} as ProviderRegistryShim;
 		await ollama.probeAndRegister(pi);
 	} catch {
 		// Non-fatal: local Ollama is optional.
@@ -303,7 +310,7 @@ function buildSessionOptions(
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
 			cliModel: parsed.model,
-			modelRegistry,
+			modelRuntime: modelRegistry.getModelRuntime(),
 		});
 		if (resolved.warning) {
 			console.warn(chalk.yellow(`Warning: ${resolved.warning}`));
@@ -449,7 +456,7 @@ export async function main(args: string[]) {
 	const settingsManager = SettingsManager.create(cwd, agentDir);
 	reportSettingsErrors(settingsManager, "startup");
 	const authStorage = AuthStorage.create();
-	const modelRegistry = ModelRegistry.create(authStorage, getModelsPath());
+	const modelRegistry = await ModelRegistry.create(authStorage, getModelsPath());
 
 	// Offline mode validation / auto-detection
 	if (offlineMode) {
@@ -640,7 +647,7 @@ export async function main(args: string[]) {
 			);
 			process.exit(1);
 		}
-		authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
+		void modelRegistry.getModelRuntime().setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
 	}
 
 	const { session, modelFallbackMessage } = await createAgentSession(sessionOptions);
@@ -660,7 +667,7 @@ export async function main(args: string[]) {
 		let effectiveThinking = session.thinkingLevel;
 		if (!session.model.reasoning) {
 			effectiveThinking = "off";
-		} else if (effectiveThinking === "xhigh" && !supportsXhigh(session.model)) {
+		} else if (effectiveThinking === "xhigh" && !getSupportedThinkingLevels(session.model).includes("xhigh")) {
 			effectiveThinking = "high";
 		}
 		if (effectiveThinking !== session.thinkingLevel) {

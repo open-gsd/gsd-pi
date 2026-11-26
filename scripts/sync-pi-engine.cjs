@@ -59,6 +59,7 @@ function applySeamImportRewrites(srcRoot, seam) {
     ...Object.entries(seam.importRewrites?.agentCore || {}),
     ...Object.entries(seam.importRewrites?.agentModes || {}),
   ]
+  const toolFixes = seam.toolComponentImportFixes || [seam.toolComponentImportFix].filter(Boolean)
   walkTs(srcRoot, (file) => {
     let content = readFileSync(file, 'utf8')
     const original = content
@@ -68,8 +69,24 @@ function applySeamImportRewrites(srcRoot, seam) {
     for (const fix of seam.piInternalPathFixes || []) {
       content = content.replaceAll(`from "${fix.from}`, `from "${fix.to}`)
     }
-    if (seam.toolComponentImportFix) {
-      content = content.replaceAll(seam.toolComponentImportFix.from, seam.toolComponentImportFix.to)
+    for (const { from, to } of toolFixes) {
+      content = content.replaceAll(from, to)
+    }
+    content = content
+      .replaceAll('../@gsd/agent-modes/', '@gsd/agent-modes/')
+      .replaceAll('../../@gsd/agent-modes/', '@gsd/agent-modes/')
+      .replaceAll('../../modes/interactive/theme/theme.js', '../../theme/theme.js')
+      .replaceAll('../modes/interactive/theme/theme.js', '../theme/theme.js')
+      .replaceAll('../../../modes/interactive/theme/theme.js', '../theme/theme.js')
+      .replaceAll('./modes/interactive/theme/theme.js', './theme/theme.js')
+      .replace(/modes\/interactive\/theme\//g, 'theme/')
+      .replaceAll('from "./modes/interactive/components/index.js"', 'from "@gsd/agent-modes"')
+      .replaceAll('from "./modes/index.js"', 'from "@gsd/agent-modes"')
+    // Theme files moved from modes/interactive/theme → theme (drop two ../ segments).
+    if (file.includes(`${require('path').sep}theme${require('path').sep}`) || file.endsWith(`${require('path').sep}theme.ts`)) {
+      for (const fix of seam.themePathFixes || []) {
+        content = content.replaceAll(fix.from, fix.to)
+      }
     }
     if (content !== original) writeFileSync(file, content)
   })
@@ -174,8 +191,17 @@ function main() {
     })
     if (targetPath === 'packages/pi-coding-agent') {
       const seam = JSON.parse(readFileSync(join(__dirname, 'pi-seam.json'), 'utf8'))
-      applyPostVendorDeletes(join(destRoot, targetPath, 'src'), seam.postVendorDeletes || [])
-      applySeamImportRewrites(join(destRoot, targetPath, 'src'), seam)
+      const srcRoot = join(destRoot, targetPath, 'src')
+      const themeUpstream = join(srcRoot, 'modes/interactive/theme')
+      const themeDest = join(srcRoot, 'theme')
+      // Seam deletes modes/; keep the interactive theme under src/theme for deep imports.
+      if (existsSync(themeUpstream)) {
+        rmSync(themeDest, { recursive: true, force: true })
+        mkdirSync(join(themeDest, '..'), { recursive: true })
+        cpSync(themeUpstream, themeDest, { recursive: true })
+      }
+      applyPostVendorDeletes(srcRoot, seam.postVendorDeletes || [])
+      applySeamImportRewrites(srcRoot, seam)
     }
   }
   if (ref !== config.pinnedRef) applyUnpinnedPorts(destRoot)

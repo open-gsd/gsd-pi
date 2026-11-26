@@ -1,0 +1,213 @@
+import { setKeybindings } from "@gsd/pi-tui";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.js";
+import {
+	type SettingsCallbacks,
+	type SettingsConfig,
+	SettingsSelectorComponent,
+} from "../src/modes/interactive/components/settings-selector.js";
+import { SelectSubmenu } from "../src/modes/interactive/components/settings-submenu.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
+import { createHarness, type Harness } from "./suite/harness.js";
+
+describe("SettingsSelectorComponent", () => {
+	let harness: Harness | undefined;
+	beforeAll(() => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+	});
+
+	afterEach(() => {
+		harness?.cleanup();
+		harness = undefined;
+	});
+
+	it("cycles through fullscreen settings", () => {
+		const onExitOutputChange = vi.fn();
+		const onScrollbarChange = vi.fn();
+		const onCopyOnSelectChange = vi.fn();
+		const onWheelScrollLinesChange = vi.fn();
+		const config = {
+			fullscreenExitOutput: "transcript",
+			fullscreenScrollbar: "auto",
+			fullscreenCopyOnSelect: true,
+			fullscreenWheelScrollLines: 7,
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = {
+			onFullscreenExitOutputChange: onExitOutputChange,
+			onFullscreenScrollbarChange: onScrollbarChange,
+			onFullscreenCopyOnSelectChange: onCopyOnSelectChange,
+			onFullscreenWheelScrollLinesChange: onWheelScrollLinesChange,
+		} as unknown as SettingsCallbacks;
+
+		const cycle = (label: string, count: number) => {
+			const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+			for (const character of label) list.handleInput(character);
+			for (let i = 0; i < count; i++) list.handleInput("\r");
+		};
+
+		cycle("Fullscreen exit output", 2);
+		expect(onExitOutputChange.mock.calls.flat()).toEqual(["resume-hint", "transcript"]);
+		cycle("Fullscreen scrollbar", 3);
+		expect(onScrollbarChange.mock.calls.flat()).toEqual(["always", "hidden", "auto"]);
+		cycle("Fullscreen copy on select", 2);
+		expect(onCopyOnSelectChange.mock.calls.flat()).toEqual([false, true]);
+		// #9758: custom values from settings.json stay in the cycle.
+		cycle("Fullscreen wheel scrolling", 3);
+		expect(onWheelScrollLinesChange.mock.calls.flat()).toEqual([10, "auto", 1]);
+	});
+
+	it("cycles through share destinations", () => {
+		const onSessionShareDestinationChange = vi.fn();
+		const config = {
+			sessionShareDestination: "auto",
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = {
+			onSessionShareDestinationChange,
+		} as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		list.selectItem("share-destination");
+
+		for (let i = 0; i < 3; i++) list.handleInput("\r");
+
+		expect(onSessionShareDestinationChange.mock.calls.flat()).toEqual(["gist", "radius", "auto"]);
+	});
+
+	it("toggles individual notices in the notices submenu", () => {
+		const onNoticeChange = vi.fn();
+		const config = {
+			notices: { cacheMisses: true, cacheWarming: true, compactionCosts: true, reasoningDrops: true },
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = { onNoticeChange, onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		list.selectItem("notices");
+		list.handleInput("\r");
+		const output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toContain("Cache misses");
+		expect(output).toContain("Reasoning drops");
+
+		for (let i = 0; i < 3; i++) list.handleInput("\x1b[B");
+		list.handleInput("\r");
+
+		expect(onNoticeChange.mock.calls).toEqual([["reasoningDrops", false]]);
+	});
+
+	it("keeps the configured fixed theme marked while browsing", () => {
+		const config = {
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			modelThinkingLevels: {},
+			currentTheme: "dark",
+			terminalTheme: "dark",
+			availableThemes: ["system", "dark", "light"],
+			warnings: {},
+		} as unknown as SettingsConfig;
+		const callbacks = { onThemePreview: vi.fn(), onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		list.selectItem("theme");
+		list.handleInput("\r");
+		let output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toMatch(
+			/ {4}system +Theme created from your terminal's colors\n {4}automatic +Use separate themes/,
+		);
+		expect(output).toContain("→ ✓ dark");
+
+		list.handleInput("\x1b[B");
+		output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toContain("  ✓ dark");
+		expect(output).toContain("→   light");
+	});
+
+	it("keeps a configured automatic theme marked while browsing", () => {
+		const config = {
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			modelThinkingLevels: {},
+			currentTheme: "light/dark",
+			terminalTheme: "dark",
+			availableThemes: ["dark", "light", "other"],
+			warnings: {},
+		} as unknown as SettingsConfig;
+		const callbacks = { onThemePreview: vi.fn(), onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		list.selectItem("theme");
+		list.handleInput("\r");
+		list.handleInput("\r");
+		let output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toContain("→ ✓ light");
+
+		list.handleInput("\x1b[B");
+		output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toContain("  ✓ light");
+		expect(output).toContain("→   other");
+	});
+
+	it("keeps the configured per-model thinking level marked while browsing", async () => {
+		harness = await createHarness({
+			models: [{ id: "thinking-model", reasoning: true }],
+		});
+		const model = harness.getModel("thinking-model")!;
+		const modelKey = `${model.provider}/${model.id}`;
+		const config = {
+			defaultModel: modelKey,
+			availableDefaultModels: [model],
+			thinkingLevel: "high",
+			modelThinkingLevels: { [modelKey]: "medium" },
+		} as unknown as SettingsConfig;
+		const callbacks = { onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		list.selectItem("model-thinking");
+		list.handleInput("\r");
+		list.handleInput("\r");
+
+		let output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toContain("→ ✓ medium");
+		expect(output).toContain("    (clear override)");
+
+		list.handleInput("\x1b[B");
+		output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toContain("  ✓ medium");
+		expect(output).toContain("→   high");
+	});
+
+	it("pages a searchable submenu with selection page keys (#7629)", () => {
+		const onSelect = vi.fn();
+		const submenu = new SelectSubmenu(
+			"Theme",
+			"",
+			Array.from({ length: 20 }, (_, index) => ({ value: `theme-${index}`, label: `theme-${index}` })),
+			"theme-0",
+			onSelect,
+			() => {},
+			undefined,
+			{ searchable: true },
+		);
+
+		submenu.handleInput("\x1b[6~"); // PageDown
+		submenu.handleInput("\r");
+
+		expect(onSelect).toHaveBeenCalledWith("theme-10");
+	});
+});

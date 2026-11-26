@@ -59,7 +59,7 @@ describe("AgentSessionExtensionsModule", () => {
     const mod = new AgentSessionExtensionsModule(host as any);
     await mod.bindExtensions({ uiContext: uiContext as any, localInteractiveDesktop: true });
 
-    host.agent.streamFn({}, {}, { maxTokens: 1 });
+    host.agent.streamFunction({}, {}, { maxTokens: 1 });
     assert.equal(received?.extensionUIContext, uiContext);
     assert.equal(localInteractiveDesktop, true);
 

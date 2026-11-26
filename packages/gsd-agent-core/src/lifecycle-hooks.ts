@@ -4,15 +4,30 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseGitUrl } from "@gsd/pi-coding-agent/utils/git.js";
-import {
-	importExtensionModule,
-	loadExtensions,
-	type LifecycleHookContext,
-	type LifecycleHookMap,
-	type LifecycleHookHandler,
-	type LifecycleHookPhase,
-	type LifecycleHookScope,
-} from "@gsd/pi-coding-agent/core/extensions/index.js";
+import { loadExtensions } from "@gsd/pi-coding-agent/core/extensions/index.js";
+
+export type LifecycleHookPhase = "beforeInstall" | "afterInstall" | "beforeRemove" | "afterRemove";
+export type LifecycleHookScope = "project" | "user";
+
+export interface LifecycleHookContext {
+	phase: LifecycleHookPhase;
+	source: string;
+	installedPath?: string;
+	scope: LifecycleHookScope;
+	cwd: string;
+	interactive: boolean;
+	log: (message: string) => void;
+	warn: (message: string) => void;
+	error: (message: string) => void;
+}
+
+export type LifecycleHookHandler = (context: LifecycleHookContext) => void | Promise<void>;
+
+export type LifecycleHookMap = Record<LifecycleHookPhase, LifecycleHookHandler[]>;
+
+async function importExtensionModule<T>(specifier: string): Promise<T> {
+	return (await import(specifier)) as T;
+}
 import type { PackageManager } from "@gsd/pi-coding-agent/core/package-manager.js";
 
 interface ExtensionManifest {
@@ -211,10 +226,7 @@ async function runLegacyExportHook(
 	try {
 		let module = _legacyModuleCache.get(entryPath);
 		if (!module) {
-			const loaded = await importExtensionModule<Record<string, unknown>>(
-				import.meta.url,
-				pathToFileURL(entryPath).href,
-			);
+			const loaded = await importExtensionModule<Record<string, unknown>>(pathToFileURL(entryPath).href);
 			module = loaded;
 			_legacyModuleCache.set(entryPath, loaded);
 		}

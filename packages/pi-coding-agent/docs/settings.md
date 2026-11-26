@@ -1,277 +1,176 @@
-# Settings
+# Settings Reference
 
-Pi uses JSON settings files with project settings overriding global settings.
+This reference lists user-configurable settings, their types, defaults, and purposes. Project settings override agent-directory settings. Resource lists are combined. See [Configuration](configuration.md) for file locations and trust behavior.
 
-| Location | Scope |
-|----------|-------|
-| `~/.pi/agent/settings.json` | Global (all projects) |
-| `.pi/settings.json` | Project (current directory) |
+Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json` for editor validation and completion.
 
-Edit directly or use `/settings` for common options.
+## Model and thinking
 
-## All Settings
-
-### Model & Thinking
+<a id="model-cycling"></a>
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
-| `defaultModel` | string | - | Default model ID |
-| `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` |
-| `hideThinkingBlock` | boolean | `true` | Hide thinking blocks in output |
-| `thinkingBudgets` | object | - | Custom token budgets per thinking level |
+|---|---|---|---|
+| `defaultProvider` | string | Automatic | Startup AI provider. |
+| `defaultModel` | string | Automatic | Startup model ID. |
+| `defaultThinkingLevel` | `"off" \| "minimal" \| "low" \| "medium" \| "high" \| "xhigh" \| "max"` | `"medium"` | Startup thinking level. |
+| `modelThinkingLevels` | object | None | Per-model startup thinking levels keyed by exact `provider/modelId`. |
+| `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
+| `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
+| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
+| `notices.cacheMisses` | boolean | `false` | Show a notice when a response re-bills a significant part of the prompt cache, such as after a model switch or an idle gap. |
+| `notices.cacheWarming` | boolean | `false` | Show the cost of cache warming requests. |
+| `notices.compactionCosts` | boolean | `false` | Show the cost of compactions and branch summaries. |
+| `notices.reasoningDrops` | boolean | `false` | Show a notice when a provider drops reasoning items from a request, such as OpenAI reasoning items after a prefix mismatch or Anthropic thinking blocks during recovery. |
+| `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"idle"` | Keep eligible provider prompt caches warm during active runs and, with `"idle"`, for up to 30 minutes between runs. `"streaming"` warms only during active runs. Global setting only. |
 
-#### thinkingBudgets
+Cache warming runs only when the model declares a cache lifetime and Pi estimates at least $0.05 in avoided cache-miss cost. Refresh usage counts toward session totals but does not enter model context. `/session` shows the next decision; extensions can override it with `cache_warming_decision`. See [Prompt Cache Lifetimes](models.md#prompt-cache-lifetimes).
+
+See [Choose a Model](models.md) for model selection and thinking controls.
+
+## Interaction
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `steeringMode` | `"all" \| "one-at-a-time"` | `"one-at-a-time"` | How queued steering messages are delivered. |
+| `followUpMode` | `"all" \| "one-at-a-time"` | `"one-at-a-time"` | How queued follow-up messages are delivered. |
+| `externalEditor` | string | `$VISUAL`, `$EDITOR`, then platform default | Command opened by the external-editor keybinding. |
+| `doubleEscapeAction` | `"tree" \| "fork" \| "none"` | `"tree"` | Action for double Escape with an empty editor. |
+| `treeFilterMode` | `"default" \| "no-tools" \| "user-only" \| "labeled-only" \| "all"` | `"default"` | Initial filter used by `/tree`. |
+| `defaultProjectTrust` | `"ask" \| "always" \| "never"` | `"ask"` | Fallback project-trust behavior. **Can only be set in agent-directory settings.** |
+
+## Tools
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write` | Tools enabled at startup. Plain names replace the defaults; `+name` adds a tool and `-name` removes one. An empty array disables all built-in tools but not extension or SDK tools. |
+| `codemode.mode` | `"on"` \| `"only"` | `"on"` | How the `codemode` tool presents tools while it is active. `on`: declared tools get a note on calling them from scripts appended to their description, and `codemode` lists only tools that are not declared. `only`: `codemode` lists every tool scripts can call, and active built-in and extension tools are hidden from the model, so it reaches them through `codemode`. |
+| `codemode.inlineBudget` | number | `3000` | Estimated tokens (characters / 4) the `codemode` tool's description may spend on tool declarations. Tools that do not fit are left out and found with `searchTools()`. `0` lists only namespaces. |
+
+Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. `defaultTools` can also name `codemode` and `tool_search`, which built-in extensions register inactive, and other extension tools registered inactive.
+
+A list of only `+name` and `-name` entries changes the inherited selection instead of replacing it. For example, this enables `codemode` next to the default tools:
 
 ```json
 {
-  "thinkingBudgets": {
-    "minimal": 1024,
-    "low": 4096,
-    "medium": 10240,
-    "high": 32768
-  }
+  "defaultTools": ["+codemode"]
 }
 ```
 
-### UI & Display
+This replaces `bash` with `powershell` and enables `grep`: `["-bash", "+powershell", "+grep"]`. Project settings apply on top of user settings: a project list with only `+name` and `-name` entries changes the user's selection, and a project list with a plain name replaces it. In one list, plain names form the selection, and `+name` and `-name` then apply in order.
+
+`/reload` enables tools newly added to `defaultTools`. It does not disable tools removed from it or re-enable unchanged tools you turned off. `--tools` with plain names, `--no-tools`, and `--no-builtin-tools` override `defaultTools`, also on reload.
+
+CLI tool options override this setting for one invocation. `--tools` with only `+name` and `-name` entries changes the resolved `defaultTools` selection instead, for example `pi --tools +codemode`. On `/reload`, these entries apply to the reloaded setting too, so a tool removed with `-name` stays removed. See [Command Line](cli.md#tools).
+
+## Sessions and context
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
-| `quietStartup` | boolean | `false` | Hide startup header |
-| `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
-| `enableInstallTelemetry` | boolean | `true` | Send an anonymous install/update version ping after first install or changelog-detected updates. This does not control update checks |
-| `doubleEscapeAction` | string | `"tree"` | Action for double-escape: `"tree"`, `"fork"`, or `"none"` |
-| `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
-| `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
-| `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
-| `showHardwareCursor` | boolean | `false` | Show terminal cursor |
-
-### Telemetry and update checks
-
-`enableInstallTelemetry` only controls the anonymous install/update ping to `https://pi.dev/api/report-install`. Opting out of telemetry does not disable update checks; Pi can still fetch `https://pi.dev/api/latest-version` to look for the latest version.
-
-Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
-
-### Warnings
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `warnings.anthropicExtraUsage` | boolean | `true` | Show a warning when Anthropic subscription auth may use paid extra usage |
-
-```json
-{
-  "warnings": {
-    "anthropicExtraUsage": false
-  }
-}
-```
+|---|---|---|---|
+| `sessionDir` | string | Agent session directory | Session storage directory. Relative paths resolve from the working directory. `PI_CODING_AGENT_SESSION_DIR` and `--session-dir` override this setting. |
+| `sessionShareDestination` | `"auto" \| "gist" \| "radius"` | `"auto"` | Destination used by `/share`. `auto` uses Radius when authenticated and otherwise creates a GitHub gist. `gist` always uses a gist. `radius` requires Radius authentication and never falls back to a gist. |
 
 ### Compaction
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `compaction.enabled` | boolean | `true` | Enable auto-compaction |
-| `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
-| `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+|---|---|---|---|
+| `compaction.enabled` | boolean | `true` | Enable automatic compaction. |
+| `compaction.reserveTokens` | number | `16384` | Free context tokens below which automatic compaction starts. |
+| `compaction.keepRecentTokens` | number | `20000` | Recent tokens retained without summarization. |
+| `compaction.modelOverrides` | object | None | Per-model token settings keyed by exact `provider/modelId`. |
 
-```json
-{
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000
-  }
-}
-```
+<a id="per-model-compaction-overrides"></a>
 
-### Branch Summary
+Compaction token values must be non-negative safe integers. Each value resolves independently from the matching model override, then the ordinary compaction setting, then the built-in default. Project and user objects merge before model lookup.
+
+See [Compaction Reference](compaction.md) for trigger, summarization, and validation behavior.
+
+### Branch summaries
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `branchSummary.reserveTokens` | number | `16384` | Tokens reserved for branch summarization |
-| `branchSummary.skipPrompt` | boolean | `false` | Skip "Summarize branch?" prompt on `/tree` navigation (defaults to no summary) |
+|---|---|---|---|
+| `branchSummary.reserveTokens` | number | `16384` | Tokens reserved when summarizing branch history. |
+| `branchSummary.skipPrompt` | boolean | `false` | Skip the branch-summary prompt and default to no summary. |
 
-### Retry
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
-| `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
-| `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
-| `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
-| `retry.provider.maxRetries` | number | SDK default | Provider/SDK retry attempts |
-| `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
-
-When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
-
-```json
-{
-  "retry": {
-    "enabled": true,
-    "maxRetries": 3,
-    "baseDelayMs": 2000,
-    "provider": {
-      "timeoutMs": 3600000,
-      "maxRetries": 0,
-      "maxRetryDelayMs": 60000
-    }
-  }
-}
-```
-
-### Message Delivery
+## Terminal and display
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
-| `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
-| `transport` | string | `"sse"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
+|---|---|---|---|
+| `theme` | string | `"system"` | Built-in or custom theme name. `system` derives colors from the terminal theme. |
+| `quietStartup` | boolean \| `"header"` | `false` | `true` hides the startup header and loaded-resource listing. `"header"` keeps the header (version and key hints) but hides the model scope line and loaded-resource listing. |
+| `tuiMode` | `"regular" \| "fullscreen"` | `"fullscreen"` | Interactive terminal UI mode. |
+| `fullscreenExitOutput` | `"transcript" \| "resume-hint"` | `"transcript"` | Output printed when fullscreen mode exits. |
+| `fullscreenScrollbar` | `"auto" \| "always" \| "hidden"` | `"auto"` | Fullscreen transcript scrollbar behavior. |
+| `fullscreenCopyOnSelect` | boolean | `true` | Copy selected text automatically in fullscreen mode. |
+| `fullscreenWheelScrollLines` | `"auto"` \| number | `"auto"` | Lines per mouse-wheel event in fullscreen mode, from 1 to 100. `"auto"` moves one line per event in local macOS terminals, which already accelerate wheel and trackpad input; elsewhere, and over SSH, it speeds up fast wheel spins to at most 6 lines per event. Alt+wheel moves five times as far. |
+| `editorPaddingX` | number | `0` | Horizontal editor padding from 0 to 3 cells. |
+| `outputPad` | `0 \| 1` | `1` | Horizontal transcript padding for messages, tool output, `!` command output, and summary blocks. |
+| `autocompleteMaxVisible` | number | `5` | Visible autocomplete entries, from 3 to 20. |
+| `showHardwareCursor` | boolean | `false` | Use the terminal cursor instead of Pi's drawn cursor. Pi still positions it for input methods. |
+| `terminal.showImages` | boolean | `true` | Display inline images when supported. |
+| `terminal.imageWidthCells` | number | `60` | Preferred inline image width in terminal cells. |
+| `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when rendered content shrinks. When unset, `PI_CLEAR_ON_SHRINK=1` enables it. |
+| `terminal.showTerminalProgress` | boolean | `false` | Show OSC 9;4 progress in the terminal tab. |
+| `terminal.hyperlinks` | `boolean \| "auto"` | `"auto"` | Override OSC 8 hyperlink detection. |
+| `terminal.images` | `"kitty" \| "iterm2" \| "auto" \| false` | `"auto"` | Override inline-image protocol detection. |
+| `terminal.trueColor` | `boolean \| "auto"` | `"auto"` | Override true-color detection. |
+| `images.autoResize` | boolean | `true` | Resize images to at most 2000 by 2000 pixels before sending them to a model. |
+| `images.blockImages` | boolean | `false` | Prevent images from being sent to models. |
+| `markdown.codeBlockIndent` | string | `"  "` | Prefix used to indent rendered code blocks. |
+| `markdown.mermaid` | `"off" \| "final" \| "streaming"` | `"streaming"` | Mermaid rendering mode. |
 
-### Terminal & Images
+See [Themes](themes.md) and [Terminal Setup](terminal-setup.md) for format and platform details.
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `terminal.showImages` | boolean | `true` | Show images in terminal (if supported) |
-| `terminal.imageWidthCells` | number | `60` | Preferred inline image width in terminal cells |
-| `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
-| `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
-| `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
-
-### Shell
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows) |
-| `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
-| `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
-
-```json
-{
-  "npmCommand": ["mise", "exec", "node@20", "--", "npm"]
-}
-```
-
-`npmCommand` is used for all npm package-manager operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.pi/agent/npm/`; project-scoped npm packages install under `.pi/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers.
-
-### Sessions
+## Network and retries
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
+|---|---|---|---|
+| `transport` | `"auto" \| "sse" \| "websocket" \| "websocket-cached"` | `"auto"` | Preferred transport for AI providers that support multiple transports. |
+| `httpProxy` | string | None | Proxy URL applied as `HTTP_PROXY` and `HTTPS_PROXY` for Pi-managed HTTP clients. **Can only be set in agent-directory settings.** |
+| `httpIdleTimeoutMs` | number \| `"disabled"` | `300000` | HTTP header and body idle timeout in milliseconds. Set to `0` or `"disabled"` to disable. |
+| `websocketConnectTimeoutMs` | number \| `"disabled"` | `15000` | WebSocket connection timeout in milliseconds. Set to `0` or `"disabled"` to disable. |
+| `retry.enabled` | boolean | `true` | Enable automatic agent-level retry for transient failures. |
+| `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts. |
+| `retry.baseDelayMs` | number | `2000` | Initial exponential-backoff delay in milliseconds. |
+| `retry.maxAgentDelayMs` | number | `60000` | Maximum agent-level retry delay in milliseconds. |
+| `retry.provider.timeoutMs` | number | `httpIdleTimeoutMs` | Provider request timeout in milliseconds. |
+| `retry.provider.maxRetries` | number | `0` | Provider-level retry attempts. |
+| `retry.provider.maxRetryDelayMs` | number | `60000` | Maximum server-requested delay in milliseconds. Set to `0` to disable the limit. |
 
-```json
-{ "sessionDir": ".pi/sessions" }
-```
+Keep `retry.provider.maxRetries` at `0` unless provider-level retries are required. Provider retries can delay Pi from handling quota and usage-limit errors itself.
 
-When multiple sources specify a session directory, precedence is `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, then `sessionDir` in settings.json.
-
-### Model Cycling
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
-
-```json
-{
-  "enabledModels": ["claude-*", "gpt-4o", "gemini-2*"]
-}
-```
-
-### Markdown
+## Shell
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `markdown.codeBlockIndent` | string | `"  "` | Indentation for code blocks |
+|---|---|---|---|
+| `shellPath` | string | Platform default | Custom shell executable path. Supports a leading `~`. |
+| `shellCommandPrefix` | string | None | Prefix prepended to every shell command. |
+| `npmCommand` | `string[]` | `npm` | Command and arguments used for npm package lookup and installation. |
+| `selfUpdateCommand` | `string[]` | None | Command and arguments `pi update` runs to update Pi itself, with `{packageName}`, `{version}`, and `{installSpec}` placeholders. `PI_SELF_UPDATE_COMMAND` takes precedence. **Can only be set in agent-directory settings.** See [Custom update command](cli.md#custom-update-command). |
 
-### Resources
+See [Shell aliases](shell-aliases.md) for shell setup and [Pi Packages](packages.md) for package-manager behavior.
 
-These settings define where to load extensions, skills, prompts, and themes from.
+## Resources
 
-Paths in `~/.pi/agent/settings.json` resolve relative to `~/.pi/agent`. Paths in `.pi/settings.json` resolve relative to `.pi`. Absolute paths and `~` are supported.
+Resource paths in user settings resolve from the agent directory. Paths in project settings resolve from the project `.pi` directory. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `packages` | array | `[]` | npm/git packages to load resources from |
-| `extensions` | string[] | `[]` | Local extension file paths or directories |
-| `skills` | string[] | `[]` | Local skill file paths or directories |
-| `prompts` | string[] | `[]` | Local prompt template paths or directories |
-| `themes` | string[] | `[]` | Local theme file paths or directories |
-| `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
+|---|---|---|---|
+| `packages` | array | `[]` | npm, git, or local Pi package sources. See [Pi Packages](packages.md). |
+| `extensions` | `string[]` | `[]` | Extension files or directories. |
+| `skills` | `string[]` | `[]` | Skill files or directories. |
+| `prompts` | `string[]` | `[]` | Prompt-template files or directories. |
+| `themes` | `string[]` | `[]` | Theme files or directories. |
+| `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands. |
 
-Arrays support glob patterns and exclusions. Use `!pattern` to exclude. Use `+path` to force-include an exact path and `-path` to force-exclude an exact path.
+Resource arrays support glob exclusions with `!pattern`, exact inclusion with `+path`, and exact exclusion with `-path`. Pi loads resources listed in both user-level and project settings.
 
-#### packages
+The built-in extensions are named `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, and `builtin:tool-search` in `extensions`. They load by default; `-builtin:mcp` disables one. A `+builtin:<name>` or `-builtin:<name>` entry in project settings overrides the user setting. `pi config` lists them under Built-in. `--no-extensions` disables them too, and `-e builtin:<name>` loads one explicitly.
 
-String form loads all resources from a package:
+## Updates, telemetry, and warnings
 
-```json
-{
-  "packages": ["pi-skills", "@org/my-extension"]
-}
-```
-
-Object form filters which resources to load:
-
-```json
-{
-  "packages": [
-    {
-      "source": "pi-skills",
-      "skills": ["brave-search", "transcribe"],
-      "extensions": []
-    }
-  ]
-}
-```
-
-See [packages.md](packages.md) for package management details.
-
-## Example
-
-```json
-{
-  "defaultProvider": "anthropic",
-  "defaultModel": "claude-sonnet-4-20250514",
-  "defaultThinkingLevel": "medium",
-  "theme": "dark",
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000
-  },
-  "retry": {
-    "enabled": true,
-    "maxRetries": 3
-  },
-  "enabledModels": ["claude-*", "gpt-4o"],
-  "warnings": {
-    "anthropicExtraUsage": true
-  },
-  "packages": ["pi-skills"]
-}
-```
-
-## Project Overrides
-
-Project settings (`.pi/settings.json`) override global settings. Nested objects are merged:
-
-```json
-// ~/.pi/agent/settings.json (global)
-{
-  "theme": "dark",
-  "compaction": { "enabled": true, "reserveTokens": 16384 }
-}
-
-// .pi/settings.json (project)
-{
-  "compaction": { "reserveTokens": 8192 }
-}
-
-// Result
-{
-  "theme": "dark",
-  "compaction": { "enabled": true, "reserveTokens": 8192 }
-}
-```
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `collapseChangelog` | boolean | `false` | Show a condensed changelog after an update. Also condenses extension package changelogs to one line per package. |
+| `enableInstallTelemetry` | boolean | `true` | Enable anonymous install/update reporting and selected provider attribution headers. Does not control update checks. |
+| `enableAnalytics` | boolean | `false` | Opt in to analytics data sharing. Currently used only by the experimental first-run setup. |
+| `warnings.anthropicExtraUsage` | boolean | `true` | Warn when Anthropic subscription authentication may use paid extra usage. |

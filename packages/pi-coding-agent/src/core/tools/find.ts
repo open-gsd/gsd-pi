@@ -1,28 +1,41 @@
 import { createInterface } from "node:readline";
-import type { AgentTool } from "@gsd/pi-agent-core";
-import { Text } from "@gsd/pi-tui";
 import { spawn } from "child_process";
+import { Minimatch } from "minimatch";
 import path from "path";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../tool-ui/keybinding-hints.js";
 import { ensureTool } from "../../utils/tools-manager.js";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { pathExists, resolveToCwd } from "./path-utils.js";
-import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.js";
-import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+import { findRenderers } from "./renderers/find.js";
+import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
-function toPosixPath(value: string): string {
-	return value.split(path.sep).join("/");
+/** Relativize a find result against the search root and normalize it to posix separators. */
+export function relativizeFindResultPath(
+	resultPath: string,
+	searchPath: string,
+	pathModule: path.PlatformPath = path,
+): string {
+	const hadTrailingSeparator =
+		resultPath.endsWith(pathModule.sep) || (pathModule.sep === "\\" && resultPath.endsWith("/"));
+	const relativePath = pathModule.isAbsolute(resultPath) ? pathModule.relative(searchPath, resultPath) : resultPath;
+	const posixPath = relativePath.split(pathModule.sep).join("/");
+	return hadTrailingSeparator && !posixPath.endsWith("/") ? `${posixPath}/` : posixPath;
 }
 
 const findSchema = Type.Object({
 	pattern: Type.String({
-		description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
+		description:
+			"Glob pattern relative to the search directory, e.g. 'src/**/*.ts'. Without '/', e.g. '*.ts', it matches file names at any depth",
 	}),
 	path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of results (default: 1000)" })),
 });
+
+export const findToolSystemPromptContribution = {
+	snippet: "Find files by glob pattern (respects .gitignore)",
+	guidelines: [],
+} as const;
 
 export type FindToolInput = Static<typeof findSchema>;
 
@@ -55,59 +68,6 @@ export interface FindToolOptions {
 	operations?: FindOperations;
 }
 
-function formatFindCall(
-	args: { pattern: string; path?: string; limit?: number } | undefined,
-	theme: typeof import("../../theme/theme.js").theme,
-): string {
-	const pattern = str(args?.pattern);
-	const rawPath = str(args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath || ".") : null;
-	const limit = args?.limit;
-	const invalidArg = invalidArgText(theme);
-	let text =
-		theme.fg("toolTitle", theme.bold("find")) +
-		" " +
-		(pattern === null ? invalidArg : theme.fg("accent", pattern || "")) +
-		theme.fg("toolOutput", ` in ${path === null ? invalidArg : path}`);
-	if (limit !== undefined) {
-		text += theme.fg("toolOutput", ` (limit ${limit})`);
-	}
-	return text;
-}
-
-function formatFindResult(
-	result: {
-		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-		details?: FindToolDetails;
-	},
-	options: ToolRenderResultOptions,
-	theme: typeof import("../../theme/theme.js").theme,
-	showImages: boolean,
-): string {
-	const output = getTextOutput(result, showImages).trim();
-	let text = "";
-	if (output) {
-		const lines = output.split("\n");
-		const maxLines = options.expanded ? lines.length : 20;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
-		}
-	}
-
-	const resultLimit = result.details?.resultLimitReached;
-	const truncation = result.details?.truncation;
-	if (resultLimit || truncation?.truncated) {
-		const warnings: string[] = [];
-		if (resultLimit) warnings.push(`${resultLimit} results limit`);
-		if (truncation?.truncated) warnings.push(`${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`);
-		text += `\n${theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
-	}
-	return text;
-}
-
 export function createFindToolDefinition(
 	cwd: string,
 	options?: FindToolOptions,
@@ -116,15 +76,15 @@ export function createFindToolDefinition(
 	return {
 		name: "find",
 		label: "find",
-		description: `Find files by glob pattern. Returns relative paths. Respects .gitignore. Truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB.`,
-		promptSnippet: "Find files by glob pattern (respects .gitignore)",
+		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
+		promptSnippet: findToolSystemPromptContribution.snippet,
 		parameters: findSchema,
 		async execute(
 			_toolCallId,
 			{ pattern, path: searchDir, limit }: { pattern: string; path?: string; limit?: number },
 			signal?: AbortSignal,
 			_onUpdate?,
-			_ctx?,
+			ctx?: ExtensionContext,
 		) {
 			return new Promise((resolve, reject) => {
 				if (signal?.aborted) {
@@ -149,8 +109,9 @@ export function createFindToolDefinition(
 
 				(async () => {
 					try {
-						const searchPath = resolveToCwd(searchDir || ".", cwd);
-						const effectiveLimit = limit ?? DEFAULT_LIMIT;
+						const searchPath = resolveToCwd(searchDir || ".", ctx?.cwd || cwd);
+						// fd treats --max-results 0 as unlimited, so a limit below 1 means 1.
+						const effectiveLimit = Math.max(1, Math.floor(limit ?? DEFAULT_LIMIT));
 						const ops = customOps ?? defaultFindOperations;
 
 						// If custom operations provide glob(), use that instead of fd.
@@ -163,9 +124,10 @@ export function createFindToolDefinition(
 								settle(() => reject(new Error("Operation aborted")));
 								return;
 							}
+							// One result past the limit tells "exactly N matches" apart from "more than N".
 							const results = await ops.glob(pattern, searchPath, {
 								ignore: ["**/node_modules/**", "**/.git/**"],
-								limit: effectiveLimit,
+								limit: effectiveLimit + 1,
 							});
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
@@ -181,12 +143,11 @@ export function createFindToolDefinition(
 								return;
 							}
 
+							const resultLimitReached = results.length > effectiveLimit;
 							// Relativize paths against the search root for stable output.
-							const relativized = results.map((p) => {
-								if (p.startsWith(searchPath)) return toPosixPath(p.slice(searchPath.length + 1));
-								return toPosixPath(path.relative(searchPath, p));
-							});
-							const resultLimitReached = relativized.length >= effectiveLimit;
+							const relativized = results
+								.slice(0, effectiveLimit)
+								.map((p) => relativizeFindResultPath(p, searchPath));
 							const rawOutput = relativized.join("\n");
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 							let resultOutput = truncation.content;
@@ -213,7 +174,7 @@ export function createFindToolDefinition(
 						}
 
 						// Default implementation uses fd.
-						const fdPath = await ensureTool("fd", true);
+						const fdPath = await ensureTool("fd");
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));
 							return;
@@ -223,34 +184,83 @@ export function createFindToolDefinition(
 							return;
 						}
 
-						// Build fd arguments. --no-require-git makes fd apply hierarchical .gitignore
-						// semantics whether or not the search path is inside a git repository, without
-						// leaking sibling-directory rules the way --ignore-file (a global source) would.
-						const args: string[] = [
-							"--glob",
-							"--color=never",
-							"--hidden",
-							"--no-require-git",
-							"--max-results",
-							String(effectiveLimit),
-						];
+						const args: string[] = ["--color=never", "--hidden"];
+
+						// fd normally ignores .gitignore outside git repos, so keep --no-require-git
+						// there. Inside repos, use fd's default git-aware behavior so parent
+						// .gitignore rules stop at nested repo boundaries:
+						// https://github.com/earendil-works/pi/issues/5960
+						let insideGitRepo = false;
+						for (let current = searchPath; ; ) {
+							if (await pathExists(path.join(current, ".git"))) {
+								insideGitRepo = true;
+								break;
+							}
+							const parent = path.dirname(current);
+							if (parent === current) break;
+							current = parent;
+						}
+						if (!insideGitRepo) args.push("--no-require-git");
 
 						// fd --glob matches against the basename unless --full-path is set; in --full-path
-						// mode it matches against the absolute candidate path, so a path-containing
-						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
-						let effectivePattern = pattern;
-						if (pattern.includes("/")) {
-							args.push("--full-path");
-							if (!pattern.startsWith("/") && !pattern.startsWith("**/") && pattern !== "**") {
-								effectivePattern = `**/${pattern}`;
+						// mode it matches against the absolute candidate path.
+						// On Windows `\` is a path separator, so native patterns like 'src\**\*.ts' are
+						// normalized to '/' (#9262). On POSIX `\` stays a glob escape character.
+						let effectivePattern = process.platform === "win32" ? pattern.replaceAll("\\", "/") : pattern;
+						// fd's full paths never contain "/./", so "./src/*.ts" would find nothing; drop the "./".
+						effectivePattern = effectivePattern.replace(/^(?:\.\/)+/, "");
+						const isPathPattern = effectivePattern.includes("/");
+						// fd's smart case: an all-lowercase pattern matches case-insensitively.
+						const ignoreCase = effectivePattern === effectivePattern.toLowerCase();
+						// A relative path pattern is anchored at the search path, like grep's glob (#12066):
+						// 'src/*.ts' finds 'src/a.ts' but not 'pkg/src/b.ts'; '**/src/*.ts' finds both.
+						// Absolute patterns are matched as given.
+						const isRelativePathPattern = isPathPattern && !path.isAbsolute(effectivePattern);
+						// fd before 10.5.1 never matches --full-path globs on Windows, and workarounds for that
+						// break on fd 10.5.1 (sharkdp/fd#2067). pi cannot rely on either fd version, so on
+						// Windows fd lists every entry and minimatch matches path patterns against the path
+						// relative to the search path, or the absolute path for absolute patterns. The options
+						// keep fd's glob behavior: `*` matches dotfiles, `+(a|b)` is literal, and smart case.
+						// A trailing '/**' becomes '/**/*' because minimatch's 'src/**' also matches 'src'
+						// itself and fd's does not.
+						const windowsPathMatcher =
+							process.platform === "win32" && isPathPattern
+								? new Minimatch(effectivePattern.replace(/\/\*\*$/, "/**/*"), {
+										dot: true,
+										noext: true,
+										nocase: ignoreCase,
+									})
+								: undefined;
+						if (windowsPathMatcher) {
+							args.push("--", "", searchPath);
+						} else {
+							// One result past the limit tells "exactly N matches" apart from "more than N" (#7121).
+							args.push("--glob", "--max-results", String(effectiveLimit + 1));
+							if (isPathPattern) args.push("--full-path");
+							if (isRelativePathPattern) {
+								// fd matches the absolute path, so the pattern is prefixed with the glob-escaped
+								// search path. Smart case is decided by the user's pattern, not by the search
+								// path's letters, so it is set explicitly.
+								const escapedRoot = searchPath.replace(/\/+$/, "").replace(/[\\*?[\]{}]/g, "\\$&");
+								effectivePattern = `${escapedRoot}/${effectivePattern}`;
+								if (ignoreCase) args.push("--ignore-case");
 							}
+							args.push("--", effectivePattern, searchPath);
 						}
-						args.push("--", effectivePattern, searchPath);
 
+						// An abort during the .git lookup above already rejected the call, but there was no
+						// child to stop yet. Do not start fd.
+						if (signal?.aborted) return;
 						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";
-						const lines: string[] = [];
+						// Results within the limit, stored only up to the first one past the byte cap:
+						// truncateHead drops the rest anyway, so they are counted but not kept.
+						const storedResults: string[] = [];
+						let resultCount = 0;
+						// Byte size of all results within the limit, each counted with a trailing newline.
+						let outputBytes = 0;
+						let resultLimitReached = false;
 
 						stopChild = () => {
 							if (!child.killed) {
@@ -266,8 +276,20 @@ export function createFindToolDefinition(
 							stderr += chunk.toString();
 						});
 
-						rl.on("line", (line) => {
-							lines.push(line);
+						rl.on("line", (rawLine) => {
+							const line = rawLine.replace(/\r$/, "").trim();
+							if (!line) return;
+							const result = relativizeFindResultPath(line, searchPath);
+							if (windowsPathMatcher && !windowsPathMatcher.match(isRelativePathPattern ? result : line)) return;
+							if (resultCount === effectiveLimit) {
+								resultLimitReached = true;
+								// Without --max-results, fd keeps listing after the limit.
+								if (windowsPathMatcher) stopChild?.();
+								return;
+							}
+							resultCount++;
+							if (outputBytes - 1 <= DEFAULT_MAX_BYTES) storedResults.push(result);
+							outputBytes += Buffer.byteLength(result, "utf-8") + 1;
 						});
 
 						child.on("error", (error) => {
@@ -281,15 +303,12 @@ export function createFindToolDefinition(
 								settle(() => reject(new Error("Operation aborted")));
 								return;
 							}
-							const output = lines.join("\n");
-							if (code !== 0) {
+							if (code !== 0 && resultCount === 0) {
 								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
-								if (!output) {
-									settle(() => reject(new Error(errorMsg)));
-									return;
-								}
+								settle(() => reject(new Error(errorMsg)));
+								return;
 							}
-							if (!output) {
+							if (resultCount === 0) {
 								settle(() =>
 									resolve({
 										content: [{ type: "text", text: "No files found matching pattern" }],
@@ -299,24 +318,13 @@ export function createFindToolDefinition(
 								return;
 							}
 
-							const relativized: string[] = [];
-							for (const rawLine of lines) {
-								const line = rawLine.replace(/\r$/, "").trim();
-								if (!line) continue;
-								const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
-								let relativePath = line;
-								if (line.startsWith(searchPath)) {
-									relativePath = line.slice(searchPath.length + 1);
-								} else {
-									relativePath = path.relative(searchPath, line);
-								}
-								if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
-								relativized.push(toPosixPath(relativePath));
-							}
-
-							const resultLimitReached = relativized.length >= effectiveLimit;
-							const rawOutput = relativized.join("\n");
-							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+							// Stored results extend past the byte cap when more exist, so truncateHead decides
+							// truncation as for the full output; only the totals need the unstored rest.
+							const truncation = {
+								...truncateHead(storedResults.join("\n"), { maxLines: Number.MAX_SAFE_INTEGER }),
+								totalLines: resultCount,
+								totalBytes: outputBytes - 1,
+							};
 							let resultOutput = truncation.content;
 							const details: FindToolDetails = {};
 							const notices: string[] = [];
@@ -351,19 +359,10 @@ export function createFindToolDefinition(
 				})();
 			});
 		},
-		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatFindCall(args, theme));
-			return text;
-		},
-		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatFindResult(result as any, options, theme, context.showImages));
-			return text;
-		},
+		...findRenderers,
 	};
 }
 
-export function createFindTool(cwd: string, options?: FindToolOptions): AgentTool<typeof findSchema> {
+export function createFindTool(cwd: string, options?: FindToolOptions): TypeBoxAgentTool<typeof findSchema> {
 	return wrapToolDefinition(createFindToolDefinition(cwd, options));
 }

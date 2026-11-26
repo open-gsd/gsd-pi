@@ -1,8 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { complete, getEnvApiKey } from "../src/stream.ts";
-import type { AssistantMessage, Context, Message, Tool, ToolCall } from "../src/types.ts";
+import { complete, getEnvApiKey, getModel } from "../src/compat.js";
+import type { AssistantMessage, Context, Message, Tool, ToolCall } from "../src/types.js";
 
 const testToolSchema = Type.Object({
 	value: Type.Number({ description: "A number to double" }),
@@ -85,13 +84,13 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			// This tests the scenario where:
 			// 1. Model A (gpt-5-mini) generates reasoning + function_call
 			// 2. User switches to Model B (gpt-5.2-codex) - same provider, different model
-			// 3. transform-messages: isSameModel=false, thinking converted to text
+			// 3. transform-messages: isSameModel=false, thinking dropped
 			// 4. But tool call ID still has OpenAI pairing history (fc_xxx paired with rs_xxx)
 			// 5. Without fix: OpenAI returns 400 "function_call without required reasoning item"
 			// 6. With fix: tool calls/results converted to text, conversation continues
 
 			const modelA = getModel("openai", "gpt-5-mini");
-			const modelB = getModel("openai", "gpt-5.2-codex");
+			const modelB = getModel("openai", "gpt-5.5");
 
 			const apiKey = getEnvApiKey("openai");
 			if (!apiKey) {
@@ -185,12 +184,12 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			// This tests cross-provider handoff:
 			// 1. Anthropic model generates thinking + function_call (toolu_xxx ID)
 			// 2. User switches to OpenAI Codex
-			// 3. transform-messages: isSameModel=false, thinking converted to text
+			// 3. transform-messages: isSameModel=false, thinking dropped
 			// 4. Tool call ID is Anthropic format (toolu_xxx), no OpenAI pairing history
 			// 5. Should work because foreign IDs have no pairing expectation
 
 			const anthropicModel = getModel("anthropic", "claude-sonnet-4-5");
-			const codexModel = getModel("openai", "gpt-5.2-codex");
+			const codexModel = getModel("openai", "gpt-5.5");
 
 			const anthropicApiKey = getEnvApiKey("anthropic");
 			const openaiApiKey = getEnvApiKey("openai");

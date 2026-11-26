@@ -1,3 +1,4 @@
+import { canonicalizePath, getPathComparisonKey } from "../utils/paths.js";
 import type { PathMetadata } from "./package-manager.js";
 
 export type SourceScope = "user" | "project" | "temporary";
@@ -9,6 +10,41 @@ export interface SourceInfo {
 	scope: SourceScope;
 	origin: SourceOrigin;
 	baseDir?: string;
+	changelogPath?: string;
+}
+
+export interface SourcePackageIdentity {
+	source: string;
+	scope: SourceScope;
+}
+
+export function getSourcePackageKey(identity: SourcePackageIdentity): string {
+	return JSON.stringify({
+		source: identity.source,
+		scope: identity.scope,
+	});
+}
+
+/** Prefix of built-in tool and extension paths, such as `builtin:read` or `builtin:mcp`. */
+export const BUILTIN_PATH_PREFIX = "builtin:";
+
+/**
+ * Source of a path that names no file: `builtin` for `builtin:<name>`, or the prefix of an
+ * angle-bracket path such as `inline` for `<inline:name>`. Undefined for file paths.
+ */
+export function getSyntheticPathSource(path: string): string | undefined {
+	if (path.startsWith(BUILTIN_PATH_PREFIX)) return "builtin";
+	if (path.startsWith("<") && path.endsWith(">")) return path.slice(1, -1).split(":")[0] || "temporary";
+	return undefined;
+}
+
+export function isSyntheticPath(path: string): boolean {
+	return path.startsWith(BUILTIN_PATH_PREFIX) || path.startsWith("<");
+}
+
+/** Key for deduplicating resource paths: synthetic paths as-is, file paths via realpath and platform casing. */
+export function getResourcePathKey(path: string): string {
+	return isSyntheticPath(path) ? path : getPathComparisonKey(canonicalizePath(path));
 }
 
 export function createSourceInfo(path: string, metadata: PathMetadata): SourceInfo {
@@ -18,6 +54,7 @@ export function createSourceInfo(path: string, metadata: PathMetadata): SourceIn
 		scope: metadata.scope,
 		origin: metadata.origin,
 		baseDir: metadata.baseDir,
+		...(metadata.changelogPath ? { changelogPath: metadata.changelogPath } : {}),
 	};
 }
 
@@ -28,6 +65,7 @@ export function createSyntheticSourceInfo(
 		scope?: SourceScope;
 		origin?: SourceOrigin;
 		baseDir?: string;
+		changelogPath?: string;
 	},
 ): SourceInfo {
 	return {
@@ -36,5 +74,6 @@ export function createSyntheticSourceInfo(
 		scope: options.scope ?? "temporary",
 		origin: options.origin ?? "top-level",
 		baseDir: options.baseDir,
+		...(options.changelogPath ? { changelogPath: options.changelogPath } : {}),
 	};
 }

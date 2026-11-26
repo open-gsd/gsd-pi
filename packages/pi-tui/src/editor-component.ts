@@ -71,7 +71,4 @@ export interface EditorComponent extends Component {
 
 	/** Set max visible items in autocomplete dropdown */
 	setAutocompleteMaxVisible?(maxVisible: number): void;
-
-	/** GSD compat: paste image from filesystem path. */
-	onPasteImagePath?: (filePath: string) => void;
 }

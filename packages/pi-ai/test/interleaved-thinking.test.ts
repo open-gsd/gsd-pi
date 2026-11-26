@@ -1,11 +1,10 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getEnvApiKey } from "../src/env-api-keys.ts";
-import { getModel } from "../src/models.ts";
-import { completeSimple } from "../src/stream.ts";
-import type { Api, Context, Model, StopReason, Tool, ToolCall, ToolResultMessage } from "../src/types.ts";
-import { StringEnum } from "../src/utils/typebox-helpers.ts";
-import { hasBedrockCredentials } from "./bedrock-utils.ts";
+import { completeSimple, getModel } from "../src/compat.js";
+import { getEnvApiKey } from "../src/env-api-keys.js";
+import type { Api, Context, Model, StopReason, Tool, ToolCall, ToolResultMessage } from "../src/types.js";
+import { StringEnum } from "../src/utils/string-enum.js";
+import { hasBedrockCredentials } from "./bedrock-utils.js";
 
 const calculatorSchema = Type.Object({
 	a: Type.Number({ description: "First number" }),

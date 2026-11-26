@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseArgs } from "../src/cli/args.ts";
+import { normalizeSessionName, parseArgs } from "../src/cli/args.js";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -115,19 +115,14 @@ describe("parseArgs", () => {
 			expect(result.appendSystemPrompt).toEqual(["Context A", "Context B"]);
 		});
 
-		test("parses --mode", () => {
-			const result = parseArgs(["--mode", "json"]);
-			expect(result.mode).toBe("json");
-		});
-
-		test("parses --mode rpc", () => {
-			const result = parseArgs(["--mode", "rpc"]);
-			expect(result.mode).toBe("rpc");
-		});
-
 		test("parses --session", () => {
 			const result = parseArgs(["--session", "/path/to/session.jsonl"]);
 			expect(result.session).toBe("/path/to/session.jsonl");
+		});
+
+		test("parses --session-id", () => {
+			const result = parseArgs(["--session-id", "orchestrated-session"]);
+			expect(result.sessionId).toBe("orchestrated-session");
 		});
 
 		test("parses --fork", () => {
@@ -150,12 +145,110 @@ describe("parseArgs", () => {
 			const result = parseArgs(["--models", "gpt-4o,claude-sonnet,gemini-pro"]);
 			expect(result.models).toEqual(["gpt-4o", "claude-sonnet", "gemini-pro"]);
 		});
+
+		// Issue #10334
+		test("ignores empty entries in --models", () => {
+			const result = parseArgs(["--models", "gpt-4o, ,claude-sonnet,"]);
+			expect(result.models).toEqual(["gpt-4o", "claude-sonnet"]);
+		});
+	});
+
+	// Issue #9045
+	describe("--mode flag", () => {
+		test.each(["text", "json", "rpc"] as const)("parses --mode %s", (mode) => {
+			const result = parseArgs(["--mode", mode]);
+			expect(result.mode).toBe(mode);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test.each(["yaml", ""])("rejects invalid --mode value %j", (mode) => {
+			const result = parseArgs(["--mode", mode, "--version"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.version).toBe(true);
+			expect(result.messages).toEqual([]);
+			expect(result.unknownFlags.size).toBe(0);
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: `Invalid mode "${mode}". Valid values: text, json, rpc` },
+			]);
+		});
+
+		test("reports a missing --mode value", () => {
+			const result = parseArgs(["--mode"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.unknownFlags.size).toBe(0);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--mode requires text, json, or rpc" }]);
+		});
+
+		test("does not consume another option as a --mode value", () => {
+			const result = parseArgs(["--mode", "--version"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.version).toBe(true);
+			expect(result.unknownFlags.size).toBe(0);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--mode requires text, json, or rpc" }]);
+		});
+
+		test("reports an invalid --mode value after a valid one", () => {
+			const result = parseArgs(["--mode", "json", "--mode", "yaml"]);
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: 'Invalid mode "yaml". Valid values: text, json, rpc' },
+			]);
+		});
+	});
+
+	describe("--name flag", () => {
+		test("parses --name flag with value", () => {
+			const result = parseArgs(["--name", "my-session"]);
+			expect(result.name).toBe("my-session");
+		});
+
+		test("parses -n shorthand", () => {
+			const result = parseArgs(["-n", "quick-session"]);
+			expect(result.name).toBe("quick-session");
+		});
+
+		test("preserves empty values for main validation", () => {
+			const result = parseArgs(["--name", ""]);
+			expect(result.name).toBe("");
+		});
+
+		test("normalizes display names and rejects whitespace-only values", () => {
+			expect(normalizeSessionName("  named session  ")).toBe("named session");
+			expect(normalizeSessionName("   ")).toBeUndefined();
+		});
+
+		test("reports missing value", () => {
+			const result = parseArgs(["--name"]);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--name requires a value" }]);
+		});
+
+		test("works alongside other flags", () => {
+			const result = parseArgs(["--name", "named-run", "--print", "--model", "gpt-4o", "hello"]);
+			expect(result.name).toBe("named-run");
+			expect(result.print).toBe(true);
+			expect(result.model).toBe("gpt-4o");
+			expect(result.messages).toEqual(["hello"]);
+		});
 	});
 
 	describe("--no-session flag", () => {
 		test("parses --no-session flag", () => {
 			const result = parseArgs(["--no-session"]);
 			expect(result.noSession).toBe(true);
+		});
+
+		test("preserves custom session IDs for non-persisting commands", () => {
+			expect(parseArgs(["--session-id", "ephemeral-id", "--help"])).toMatchObject({
+				sessionId: "ephemeral-id",
+				help: true,
+			});
+			expect(parseArgs(["--session-id", "ephemeral-id", "--list-models"])).toMatchObject({
+				sessionId: "ephemeral-id",
+				listModels: true,
+			});
+			expect(parseArgs(["--session-id", "ephemeral-id", "--no-session"])).toMatchObject({
+				sessionId: "ephemeral-id",
+				noSession: true,
+			});
 		});
 	});
 
@@ -186,6 +279,14 @@ describe("parseArgs", () => {
 			const result = parseArgs(["--no-extensions", "-e", "foo.ts", "-e", "bar.ts"]);
 			expect(result.noExtensions).toBe(true);
 			expect(result.extensions).toEqual(["foo.ts", "bar.ts"]);
+		});
+	});
+
+	describe("--no-mcp flag", () => {
+		test("parses --no-mcp flag", () => {
+			const result = parseArgs(["--no-mcp"]);
+			expect(result.noMcp).toBe(true);
+			expect(result.unknownFlags.size).toBe(0);
 		});
 	});
 
@@ -225,6 +326,20 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--use-theme flag", () => {
+		test("parses --use-theme", () => {
+			const result = parseArgs(["--use-theme", "light"]);
+			expect(result.useTheme).toBe("light");
+		});
+
+		test("reports when the theme name value is missing", () => {
+			const result = parseArgs(["--use-theme", "--print"]);
+			expect(result.useTheme).toBeUndefined();
+			expect(result.print).toBe(true);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--use-theme requires a theme name" }]);
+		});
+	});
+
 	describe("--no-skills flag", () => {
 		test("parses --no-skills flag", () => {
 			const result = parseArgs(["--no-skills"]);
@@ -258,6 +373,28 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("project approval flags", () => {
+		test("parses --approve", () => {
+			const result = parseArgs(["--approve"]);
+			expect(result.projectTrustOverride).toBe(true);
+		});
+
+		test("parses -a shorthand", () => {
+			const result = parseArgs(["-a"]);
+			expect(result.projectTrustOverride).toBe(true);
+		});
+
+		test("parses --no-approve", () => {
+			const result = parseArgs(["--no-approve"]);
+			expect(result.projectTrustOverride).toBe(false);
+		});
+
+		test("parses -na shorthand", () => {
+			const result = parseArgs(["-na"]);
+			expect(result.projectTrustOverride).toBe(false);
+		});
+	});
+
 	describe("--verbose flag", () => {
 		test("parses --verbose flag", () => {
 			const result = parseArgs(["--verbose"]);
@@ -269,6 +406,31 @@ describe("parseArgs", () => {
 		test("parses --offline flag", () => {
 			const result = parseArgs(["--offline"]);
 			expect(result.offline).toBe(true);
+		});
+	});
+
+	describe("--tui-mode flag", () => {
+		test.each(["regular", "fullscreen"] as const)("parses %s mode", (mode) => {
+			const result = parseArgs(["--tui-mode", mode]);
+			expect(result.tuiMode).toBe(mode);
+		});
+
+		test("rejects invalid modes", () => {
+			const result = parseArgs(["--tui-mode", "other"]);
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: 'Invalid TUI mode "other". Valid values: regular, fullscreen' },
+			]);
+		});
+
+		test("requires a mode", () => {
+			const result = parseArgs(["--tui-mode"]);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--tui-mode requires regular or fullscreen" }]);
+		});
+
+		test("does not recognize the old --ui-mode flag", () => {
+			const result = parseArgs(["--ui-mode", "fullscreen"]);
+			expect(result.tuiMode).toBeUndefined();
+			expect(result.unknownFlags.get("ui-mode")).toBe("fullscreen");
 		});
 	});
 
@@ -301,6 +463,41 @@ describe("parseArgs", () => {
 		test("parses -t shorthand", () => {
 			const result = parseArgs(["-t", "read,bash"]);
 			expect(result.tools).toEqual(["read", "bash"]);
+		});
+
+		test("parses +name and -name tool modifiers", () => {
+			const result = parseArgs(["-t", "+codemode,-write"]);
+			expect(result.tools).toEqual(["+codemode", "-write"]);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("rejects tool names mixed with modifiers", () => {
+			const result = parseArgs(["--tools", "read,+codemode"]);
+			expect(result.tools).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: "--tools: tool names cannot be mixed with +name or -name entries" },
+			]);
+		});
+
+		test("rejects patterns in tool modifiers", () => {
+			const result = parseArgs(["-t", "+mcp__radius__*"]);
+			expect(result.tools).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{
+					type: "error",
+					message: "-t: +name and -name entries take exact tool names, not patterns: +mcp__radius__*",
+				},
+			]);
+		});
+
+		test("parses --exclude-tools flag", () => {
+			const result = parseArgs(["--exclude-tools", "read,bash"]);
+			expect(result.excludeTools).toEqual(["read", "bash"]);
+		});
+
+		test("parses -xt shorthand", () => {
+			const result = parseArgs(["-xt", "read,bash"]);
+			expect(result.excludeTools).toEqual(["read", "bash"]);
 		});
 
 		test("parses --no-tools with explicit --tools flags", () => {

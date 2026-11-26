@@ -39,11 +39,11 @@ export function truncateToVisualLines(
 	const allVisualLines = tempText.render(width);
 
 	if (allVisualLines.length <= maxVisualLines) {
-		return { visualLines: allVisualLines, skippedCount: 0 };
+		return { visualLines: [...allVisualLines], skippedCount: 0 };
 	}
 
 	// Take the last N visual lines
-	const truncatedLines = allVisualLines.slice(-maxVisualLines);
+	const truncatedLines = [...allVisualLines].slice(-maxVisualLines);
 	const skippedCount = allVisualLines.length - maxVisualLines;
 
 	return { visualLines: truncatedLines, skippedCount };

@@ -111,29 +111,31 @@ function applyThemePathFixes() {
 }
 
 function applyToolComponentImportFixes() {
-  const toolsDir = join(PI_SRC, 'core/tools')
-  if (!existsSync(toolsDir)) return
-
-  const { from, to } = CONFIG.toolComponentImportFix
-  for (const f of readdirSync(toolsDir)) {
-    if (!f.endsWith('.ts')) continue
-    const p = join(toolsDir, f)
-    let c = readFileSync(p, 'utf8')
-    const n = c.replaceAll(from, to)
-    if (n !== c) writeFileSync(p, n)
-  }
+  const fixes = CONFIG.toolComponentImportFixes || [CONFIG.toolComponentImportFix].filter(Boolean)
+  walk(PI_SRC, (file) => {
+    let c = readFileSync(file, 'utf8')
+    const orig = c
+    for (const { from, to } of fixes) {
+      c = c.replaceAll(from, to)
+    }
+    // Normalize package imports that incorrectly kept a relative prefix.
+    c = c.replaceAll('../@gsd/agent-modes/', '@gsd/agent-modes/')
+    c = c.replaceAll('../../@gsd/agent-modes/', '@gsd/agent-modes/')
+    if (c !== orig) writeFileSync(file, c)
+  })
 }
 
 function applyCoreThemeImportFixes() {
-  const coreDir = join(PI_SRC, 'core')
-  if (!existsSync(coreDir)) return
-
-  walk(coreDir, (file) => {
+  walk(PI_SRC, (file) => {
     let c = readFileSync(file, 'utf8')
     const n = c
       .replaceAll('../../modes/interactive/theme/theme.js', '../../theme/theme.js')
       .replaceAll('../modes/interactive/theme/theme.js', '../theme/theme.js')
+      .replaceAll('../../../modes/interactive/theme/theme.js', '../theme/theme.js')
+      .replaceAll('./modes/interactive/theme/theme.js', './theme/theme.js')
       .replace(/modes\/interactive\/theme\//g, 'theme/')
+      .replaceAll('from "./modes/interactive/components/index.js"', 'from "@gsd/agent-modes"')
+      .replaceAll('from "./modes/index.js"', 'from "@gsd/agent-modes"')
     if (n !== c) writeFileSync(file, n)
   })
 }

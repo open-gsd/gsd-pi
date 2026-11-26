@@ -192,7 +192,7 @@ function isBlankRenderLine(line: string): boolean {
 	return stripAnsiCodes(line).trim().length === 0;
 }
 
-export function trimOuterBlankLines(lines: string[]): string[] {
+export function trimOuterBlankLines(lines: readonly string[]): string[] {
 	let start = 0;
 	let end = lines.length;
 	while (start < end && isBlankRenderLine(lines[start]!)) start++;
@@ -201,7 +201,7 @@ export function trimOuterBlankLines(lines: string[]): string[] {
 }
 
 /** Collapse runs of blank lines to a single blank line (tool output only). */
-export function collapseBlankLines(lines: string[]): string[] {
+export function collapseBlankLines(lines: readonly string[]): string[] {
 	const out: string[] = [];
 	for (const line of lines) {
 		const blank = isBlankRenderLine(line);
@@ -325,7 +325,7 @@ export function openSurface(
  * plain ◇ header plus copy-clean body lines (Variant A — no horizontal rules).
  */
 export function renderChatFrame(
-	contentLines: string[],
+	contentLines: readonly string[],
 	width: number,
 	opts: {
 		label: string;
@@ -396,7 +396,7 @@ export function renderPlainSpeakerHeader(
 }
 
 export function renderPlainSpeakerBody(
-	lines: string[],
+	lines: readonly string[],
 	width: number,
 	bodyColor: "userMessageText" | "assistantMessageText",
 ): string[] {
@@ -405,7 +405,7 @@ export function renderPlainSpeakerBody(
 }
 
 export function renderPlainSpeakerMessage(
-	lines: string[],
+	lines: readonly string[],
 	width: number,
 	opts: { label: string; meta?: string; tone: "user" | "assistant"; trailingBlank?: boolean },
 ): string[] {
@@ -562,7 +562,7 @@ export function renderCompactToolStrip(
 }
 
 export function renderPlainToolMessage(
-	bodyLines: string[],
+	bodyLines: readonly string[],
 	width: number,
 	opts: { title: string; target?: string; meta?: string; tone: StatusTone },
 ): string[] {

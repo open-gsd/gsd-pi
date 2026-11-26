@@ -1,17 +1,35 @@
 /**
  * Core modules shared between all run modes.
+ * Session/SDK/compaction live in @gsd/agent-core (ADR-010 seam).
  */
 
+export type { CacheWarmingDecision, CacheWarmingStatus } from "./cache-warmer.js";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.js";
+export { areExperimentalFeaturesEnabled } from "./experimental.js";
+// Extensions system
 export {
+	type AgentActivityOutcome,
+	type AgentBeforeSettleEvent,
+	type AgentBeforeSettleEventResult,
 	type AgentEndEvent,
+	type AgentSettledEvent,
 	type AgentStartEvent,
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	type BeforeAgentStartEvent,
 	type BeforeAgentStartEventResult,
+	type BoundaryContextPreview,
+	type BoundaryResult,
+	type BoundaryState,
 	type BuildSystemPromptOptions,
+	type CacheWarmingDecisionEvent,
+	type CacheWarmingDecisionEventResult,
+	type CompactionEntryDraft,
+	type ContextEditEntryDraft,
 	type ContextEvent,
+	type ContextWithSystemEvent,
+	type CustomEntryDraft,
+	type CustomMessageEntryDraft,
 	defineTool,
 	discoverAndLoadExtensions,
 	type ExecOptions,
@@ -28,13 +46,16 @@ export {
 	ExtensionRunner,
 	type ExtensionShortcut,
 	type ExtensionUIContext,
+	type InlineExtension,
 	type LoadExtensionsResult,
 	type MessageRenderer,
+	type NormalizedBuildSystemPromptOptions,
 	type RegisteredCommand,
 	type SessionBeforeCompactEvent,
 	type SessionBeforeForkEvent,
 	type SessionBeforeSwitchEvent,
 	type SessionBeforeTreeEvent,
+	type SessionBoundaryDraft,
 	type SessionCompactEvent,
 	type SessionShutdownEvent,
 	type SessionStartEvent,
@@ -45,6 +66,7 @@ export {
 	type ToolRenderResultOptions,
 	type ToolResultEvent,
 	type TurnEndEvent,
+	type TurnEndEventResult,
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.js";

@@ -1,170 +1,81 @@
-import { Type } from "typebox";
-import { Compile } from "typebox/compile";
-import type { Api, Model } from "./types.js";
+import type {
+	Api,
+	ClassifierApi,
+	ClassifierModel,
+	ImageApi,
+	ImageModel,
+	Model,
+	ModelType,
+	ProviderId,
+} from "./types.js";
 
-const PercentileCutoffsSchema = Type.Object({
-	p50: Type.Optional(Type.Number({ minimum: 0 })),
-	p75: Type.Optional(Type.Number({ minimum: 0 })),
-	p90: Type.Optional(Type.Number({ minimum: 0 })),
-	p99: Type.Optional(Type.Number({ minimum: 0 })),
-});
+export type ModelGroups = Record<string, Record<string, object>>;
 
-const OpenRouterRoutingSchema = Type.Object({
-	allow_fallbacks: Type.Optional(Type.Boolean()),
-	require_parameters: Type.Optional(Type.Boolean()),
-	data_collection: Type.Optional(Type.Union([Type.Literal("deny"), Type.Literal("allow")])),
-	zdr: Type.Optional(Type.Boolean()),
-	enforce_distillable_text: Type.Optional(Type.Boolean()),
-	order: Type.Optional(Type.Array(Type.String())),
-	only: Type.Optional(Type.Array(Type.String())),
-	ignore: Type.Optional(Type.Array(Type.String())),
-	quantizations: Type.Optional(Type.Array(Type.String())),
-	sort: Type.Optional(
-		Type.Union([
-			Type.String(),
-			Type.Object({
-				by: Type.Optional(Type.String()),
-				partition: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-			}),
-		]),
-	),
-	max_price: Type.Optional(
-		Type.Object({
-			prompt: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.String()])),
-			completion: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.String()])),
-			image: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.String()])),
-			audio: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.String()])),
-			request: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.String()])),
-		}),
-	),
-	preferred_min_throughput: Type.Optional(
-		Type.Union([Type.Number({ minimum: 0 }), PercentileCutoffsSchema]),
-	),
-	preferred_max_latency: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), PercentileCutoffsSchema])),
-});
+type ModelKey<TGroups extends ModelGroups> = {
+	[TApi in keyof TGroups]: keyof TGroups[TApi];
+}[keyof TGroups] &
+	string;
 
-const CompatSchema = Type.Object({
-	supportsStore: Type.Optional(Type.Boolean()),
-	supportsDeveloperRole: Type.Optional(Type.Boolean()),
-	supportsReasoningEffort: Type.Optional(Type.Boolean()),
-	supportsUsageInStreaming: Type.Optional(Type.Boolean()),
-	maxTokensField: Type.Optional(Type.Union([Type.Literal("max_completion_tokens"), Type.Literal("max_tokens")])),
-	requiresToolResultName: Type.Optional(Type.Boolean()),
-	requiresAssistantAfterToolResult: Type.Optional(Type.Boolean()),
-	requiresThinkingAsText: Type.Optional(Type.Boolean()),
-	requiresReasoningContentOnAssistantMessages: Type.Optional(Type.Boolean()),
-	thinkingFormat: Type.Optional(
-		Type.Union([
-			Type.Literal("openai"),
-			Type.Literal("openrouter"),
-			Type.Literal("together"),
-			Type.Literal("deepseek"),
-			Type.Literal("zai"),
-			Type.Literal("qwen"),
-			Type.Literal("qwen-chat-template"),
-		]),
-	),
-	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
-	vercelGatewayRouting: Type.Optional(
-		Type.Object({
-			only: Type.Optional(Type.Array(Type.String())),
-			order: Type.Optional(Type.Array(Type.String())),
-		}),
-	),
-	zaiToolStream: Type.Optional(Type.Boolean()),
-	supportsStrictMode: Type.Optional(Type.Boolean()),
-	cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
-	sendSessionIdHeader: Type.Optional(Type.Boolean()),
-	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
-	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
-	supportsEagerToolInputStreaming: Type.Optional(Type.Boolean()),
-	supportsCacheControlOnTools: Type.Optional(Type.Boolean()),
-	forceAdaptiveThinking: Type.Optional(Type.Boolean()),
-	rejectsDisabledThinking: Type.Optional(Type.Boolean()),
-});
+type KeyForType<TGroups extends ModelGroups, TType extends ModelType> = Extract<
+	ModelKey<TGroups>,
+	`${TType}:${string}`
+>;
 
-const ThinkingLevelMapSchema = Type.Object(
-	{
-		off: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-		minimal: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-		low: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-		medium: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-		high: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-		xhigh: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-		max: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-	},
-	{ additionalProperties: false },
-);
+type ModelId<TKey extends string> = TKey extends `${ModelType}:${infer TModelId}` ? TModelId : never;
 
-const CostTierSchema = Type.Object({
-	inputTokensAbove: Type.Number({ minimum: 0 }),
-	input: Type.Optional(Type.Number()),
-	output: Type.Optional(Type.Number()),
-	cacheRead: Type.Optional(Type.Number()),
-	cacheWrite: Type.Optional(Type.Number()),
-});
+type ApiForKey<TGroups extends ModelGroups, TKey extends ModelKey<TGroups>> = {
+	[TApi in keyof TGroups]: TKey extends keyof TGroups[TApi] ? TApi : never;
+}[keyof TGroups];
 
-const ModelCatalogEntrySchema = Type.Object({
-	id: Type.String({ minLength: 1 }),
-	name: Type.String({ minLength: 1 }),
-	api: Type.String({ minLength: 1 }),
-	provider: Type.String({ minLength: 1 }),
-	baseUrl: Type.String(),
-	reasoning: Type.Boolean(),
-	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
-	input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image"), Type.Literal("video")]), { minItems: 1 }),
-	cost: Type.Object({
-		input: Type.Number(),
-		output: Type.Number(),
-		cacheRead: Type.Number(),
-		cacheWrite: Type.Number(),
-		tiers: Type.Optional(Type.Array(CostTierSchema)),
-	}),
-	contextWindow: Type.Number({ minimum: 1 }),
-	maxTokens: Type.Number({ minimum: 1 }),
-	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
-	compat: Type.Optional(CompatSchema),
-	providerOptions: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-});
+export type ChatModelCatalog<TGroups extends ModelGroups, TProvider extends ProviderId> = {
+	[TKey in KeyForType<TGroups, "chat"> as ModelId<TKey>]: Model<ApiForKey<TGroups, TKey> & Api> & {
+		id: ModelId<TKey>;
+		provider: TProvider;
+	};
+};
 
-const ModelsCatalogSchema = Type.Record(
-	Type.String({ minLength: 1 }),
-	Type.Record(Type.String({ minLength: 1 }), ModelCatalogEntrySchema),
-);
-const validateModelsCatalog = Compile(ModelsCatalogSchema);
+export type ImageModelCatalog<TGroups extends ModelGroups, TProvider extends ProviderId> = {
+	[TKey in KeyForType<TGroups, "image"> as ModelId<TKey>]: ImageModel<ApiForKey<TGroups, TKey> & ImageApi> & {
+		id: ModelId<TKey>;
+		provider: TProvider;
+	};
+};
 
-export type ModelsCatalog = Record<string, Record<string, Model<Api>>>;
+export type ClassifierModelCatalog<TGroups extends ModelGroups, TProvider extends ProviderId> = {
+	[TKey in KeyForType<TGroups, "classifier"> as ModelId<TKey>]: ClassifierModel<
+		ApiForKey<TGroups, TKey> & ClassifierApi
+	> & {
+		id: ModelId<TKey>;
+		provider: TProvider;
+	};
+};
 
-export interface ModelsCatalogOverlay {
-	version: 1;
-	fetchedAt?: string;
-	source?: string;
-	models: ModelsCatalog;
-}
-
-export function isModelsCatalog(value: unknown): value is ModelsCatalog {
-	if (!validateModelsCatalog.Check(value)) return false;
-
-	const providers = Object.entries(value as ModelsCatalog);
-	if (providers.length === 0) return false;
-
-	return providers.every(([providerId, models]) => {
-		const entries = Object.entries(models);
-		return (
-			entries.length > 0
-			&& entries.every(([modelId, model]) => model.id === modelId && model.provider === providerId)
-		);
-	});
-}
-
-export function isModelsCatalogOverlay(value: unknown): value is ModelsCatalogOverlay {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-
-	const overlay = value as Partial<ModelsCatalogOverlay>;
-	return (
-		overlay.version === 1
-		&& (overlay.fetchedAt === undefined || typeof overlay.fetchedAt === "string")
-		&& (overlay.source === undefined || typeof overlay.source === "string")
-		&& isModelsCatalog(overlay.models)
+function flattenModelCatalog(groups: ModelGroups, type: ModelType): Record<string, object> {
+	return Object.fromEntries(
+		Object.values(groups)
+			.flatMap((models) => Object.values(models))
+			.filter((model) => (model as { type?: unknown }).type === type)
+			.map((model) => [(model as { id: string }).id, model]),
 	);
+}
+
+export function flattenChatModelCatalog<const TProvider extends ProviderId, const TGroups extends ModelGroups>(
+	_provider: TProvider,
+	groups: TGroups,
+): ChatModelCatalog<TGroups, TProvider> {
+	return flattenModelCatalog(groups, "chat") as ChatModelCatalog<TGroups, TProvider>;
+}
+
+export function flattenImageModelCatalog<const TProvider extends ProviderId, const TGroups extends ModelGroups>(
+	_provider: TProvider,
+	groups: TGroups,
+): ImageModelCatalog<TGroups, TProvider> {
+	return flattenModelCatalog(groups, "image") as ImageModelCatalog<TGroups, TProvider>;
+}
+
+export function flattenClassifierModelCatalog<const TProvider extends ProviderId, const TGroups extends ModelGroups>(
+	_provider: TProvider,
+	groups: TGroups,
+): ClassifierModelCatalog<TGroups, TProvider> {
+	return flattenModelCatalog(groups, "classifier") as ClassifierModelCatalog<TGroups, TProvider>;
 }

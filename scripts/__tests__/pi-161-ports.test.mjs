@@ -13,7 +13,6 @@ const {
   portGoogleShared,
   portModelRegistryReadiness,
   buildClaudeSchemaModule,
-  THEME_SHIM,
   EXTENSION_SHIM,
 } = require('../pi-161-ports.cjs')
 
@@ -134,13 +133,15 @@ test('google convertTools uses the Claude schema sanitizer on the legacy paramet
 })
 
 test('model registry keeps ModelRuntime and answers readiness from it', () => {
-  const result = portModelRegistryReadiness('\tunregisterProvider(providerName: string): void {')
+  const result = portModelRegistryReadiness(
+    ['constructor(runtime: ModelRuntime) {', '\t\tthis.runtime = runtime;', '\t}', '\tunregisterProvider(providerName: string): void {'].join('\n'),
+  )
   assert.equal(result.applied, true)
   assert.match(result.content, /this\.runtime\.hasConfiguredAuth\(provider\)/)
+  assert.match(result.content, /static async create\(/)
 })
 
-test('shims keep the old theme and extension type paths', () => {
-  assert.match(THEME_SHIM, /modes\/interactive\/theme\/theme\.ts/)
+test('extension type shim keeps GsdProgressState', () => {
   assert.match(EXTENSION_SHIM, /export interface GsdProgressState/)
   assert.match(EXTENSION_SHIM, /from "\.\/types\.ts"/)
 })

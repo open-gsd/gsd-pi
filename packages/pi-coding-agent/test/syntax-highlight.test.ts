@@ -1,7 +1,60 @@
-import { describe, expect, it } from "vitest";
-import { highlight, renderHighlightedHtml, supportsLanguage } from "../src/utils/syntax-highlight.ts";
+import { resetCapabilitiesCache, setCapabilities } from "@gsd/pi-tui";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	getLanguageFromPath,
+	getMarkdownTheme,
+	highlightCode,
+	initTheme,
+	theme,
+} from "../src/modes/interactive/theme/theme.js";
+import {
+	highlight,
+	loadAllHighlightLanguages,
+	renderHighlightedHtml,
+	supportsLanguage,
+} from "../src/utils/syntax-highlight.js";
+
+const eagerLanguages = [
+	"python",
+	"java",
+	"go",
+	"javascript",
+	"cpp",
+	"typescript",
+	"php",
+	"ruby",
+	"c",
+	"csharp",
+	"nix",
+	"bash",
+	"rust",
+	"scala",
+	"kotlin",
+	"swift",
+	"dart",
+	"groovy",
+	"perl",
+	"lua",
+];
+const eagerLanguagesLoadedAtStartup = eagerLanguages.every(supportsLanguage);
+const uncommonLanguageLoadedAtStartup = supportsLanguage("ada");
 
 describe("syntax highlight renderer", () => {
+	it("loads the twenty most common languages at startup and defers the rest", async () => {
+		expect(eagerLanguagesLoadedAtStartup).toBe(true);
+		expect(uncommonLanguageLoadedAtStartup).toBe(false);
+		await loadAllHighlightLanguages();
+		expect(supportsLanguage("ada")).toBe(true);
+	});
+
+	it("maps file extensions of eagerly loaded languages to their language", () => {
+		expect(getLanguageFromPath("lib/main.dart")).toBe("dart");
+		expect(getLanguageFromPath("flake.nix")).toBe("nix");
+		expect(getLanguageFromPath("script.groovy")).toBe("groovy");
+		expect(getLanguageFromPath("build.gradle")).toBe("groovy");
+		expect(getLanguageFromPath("src/Main.kt")).toBe("kotlin");
+	});
+
 	it("renders highlighted spans with the provided theme", () => {
 		const rendered = renderHighlightedHtml('<span class="hljs-keyword">const</span> value', {
 			keyword: (text) => `[keyword:${text}]`,
@@ -44,5 +97,59 @@ describe("syntax highlight renderer", () => {
 		});
 		expect(rendered).toContain("[keyword:const]");
 		expect(rendered).toContain("[number:1]");
+	});
+});
+
+describe("theme syntax highlighting", () => {
+	beforeEach(() => {
+		setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+		initTheme("dark");
+	});
+
+	afterEach(() => {
+		resetCapabilitiesCache();
+	});
+
+	// #10143
+	it("colors each line of Python docstrings independently", () => {
+		const code = '"""\nline one\n\nline two\n"""\nafter';
+		const ansi = theme.getFgAnsi("syntaxString");
+		const expected = [
+			`${ansi}"""\x1b[39m`,
+			`${ansi}line one\x1b[39m`,
+			"",
+			`${ansi}line two\x1b[39m`,
+			`${ansi}"""\x1b[39m`,
+			`${theme.getFgAnsi("text")}after\x1b[39m`,
+		];
+
+		expect(highlightCode(code, "python")).toEqual(expected);
+		expect(getMarkdownTheme().highlightCode?.(code, "python")).toEqual(expected);
+	});
+
+	// Regression for #11092.
+	it("colors unscoped highlighted code with the theme foreground", () => {
+		initTheme("light");
+
+		const lines = highlightCode("plainIdentifier\nconst answer = 42;", "typescript");
+		const text = theme.getFgAnsi("text");
+
+		expect(lines[0]).toBe(`${text}plainIdentifier\x1b[39m`);
+		expect(lines[1]).toContain(`${text} answer = \x1b[39m`);
+	});
+
+	it("colors diff additions and deletions in fenced diff blocks", () => {
+		const lines = highlightCode("-old\n+new\n", "diff");
+
+		expect(lines[0]).toBe(`${theme.getFgAnsi("toolDiffRemoved")}-old\x1b[39m`);
+		expect(lines[1]).toBe(`${theme.getFgAnsi("toolDiffAdded")}+new\x1b[39m`);
+	});
+
+	it("keeps cli-highlight default styled scopes mapped to theme styles", () => {
+		expect(highlightCode("const re = /foo+/gi;", "javascript")[0]).toContain(
+			`${theme.getFgAnsi("syntaxString")}/foo+/gi\x1b[39m`,
+		);
+		expect(highlightCode("@decorator", "python")[0]).toBe(`${theme.getFgAnsi("muted")}@decorator\x1b[39m`);
+		expect(highlightCode("<div></div>", "html")[0]).toContain(`${theme.getFgAnsi("syntaxKeyword")}div\x1b[39m`);
 	});
 });
