@@ -181,5 +181,22 @@ export function createGSDExtensionAPI(
       const value = Reflect.get(target, prop, receiver);
       return typeof value === "function" ? value.bind(target) : value;
     },
+    ownKeys(target) {
+      const keys = new Set<string | symbol>(Reflect.ownKeys(target));
+      for (const key of Object.keys(gsdExtras)) {
+        keys.add(key);
+      }
+      return [...keys];
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (prop in gsdExtras) {
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+        };
+      }
+      return Reflect.getOwnPropertyDescriptor(target, prop);
+    },
   }) as GSDExtensionAPI;
 }

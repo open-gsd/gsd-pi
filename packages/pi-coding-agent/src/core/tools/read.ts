@@ -302,9 +302,9 @@ export function createReadToolDefinition(
 								}
 							} else {
 								// Read text content. Convert offset from 1-indexed input to 0-indexed line access.
-								const startLine = offset ? Math.max(0, offset - 1) : 0;
-								const startLineDisplay = startLine + 1;
-								const { totalFileLines, truncation, firstLineBytes } =
+								const requestedStartLine = offset ? Math.max(0, offset - 1) : 0;
+								let startLine = requestedStartLine;
+								let selected =
 									ops.createReadStream && isStreamableRange(offset, limit)
 										? await selectLinesFromStream(
 												ops.createReadStream(absolutePath, { signal }),
@@ -314,10 +314,14 @@ export function createReadToolDefinition(
 											)
 										: selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit);
 								if (aborted) return;
-								// Check if offset is out of bounds.
-								if (startLine >= totalFileLines) {
-									throw new Error(`Offset ${offset} is beyond end of file (${totalFileLines} lines total)`);
+								if (selected.totalFileLines > 0 && requestedStartLine >= selected.totalFileLines) {
+									startLine = selected.totalFileLines - 1;
+									selected = selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit);
 								}
+								const { totalFileLines, truncation, firstLineBytes } = selected;
+								const startLineDisplay = startLine + 1;
+								const offsetWasClamped =
+									offset !== undefined && totalFileLines > 0 && requestedStartLine !== startLine;
 								// A user-specified limit is honored before truncation.
 								const userLimitedLines =
 									limit === undefined ? undefined : Math.min(startLine + limit, totalFileLines) - startLine;
@@ -346,6 +350,9 @@ export function createReadToolDefinition(
 								} else {
 									// No truncation and no remaining user-limited content.
 									outputText = truncation.content;
+								}
+								if (offsetWasClamped) {
+									outputText += `\n\n[Requested offset ${offset} was beyond the end of the file (${totalFileLines} lines total), so it was clamped to line ${startLineDisplay}.]`;
 								}
 								content = [{ type: "text", text: outputText }];
 							}

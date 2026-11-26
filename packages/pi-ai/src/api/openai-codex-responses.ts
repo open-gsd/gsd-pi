@@ -234,11 +234,23 @@ function compressRequestBodyZstd(bodyJson: string): Uint8Array<ArrayBuffer> | nu
 // Main Stream Function
 // ============================================================================
 
+/** Host-compat defaults for callers (GSD tests, scripts) that pass minimal model stubs. */
+function withCodexModelDefaults(model: Model<"openai-codex-responses">): Model<"openai-codex-responses"> {
+	return {
+		...model,
+		input: model.input ?? ["text"],
+		contextWindow: model.contextWindow ?? 200_000,
+		maxTokens: model.maxTokens ?? 16_384,
+		cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
 export const stream: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions> = (
-	model: Model<"openai-codex-responses">,
+	modelArg: Model<"openai-codex-responses">,
 	context: TranscriptContext,
 	options?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
+	const model = withCodexModelDefaults(modelArg);
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
 
@@ -512,10 +524,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 };
 
 export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStreamOptions> = (
-	model: Model<"openai-codex-responses">,
+	modelArg: Model<"openai-codex-responses">,
 	context: TranscriptContext,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
+	const model = withCodexModelDefaults(modelArg);
 	const apiKey = options?.apiKey;
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
@@ -759,10 +772,15 @@ function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 }
 
-function extractCodexEventError(event: Record<string, unknown>): { code?: string; message?: string } {
+function extractCodexEventError(event: Record<string, unknown>): {
+	code?: string;
+	message?: string;
+	errorType?: string;
+} {
 	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
 	return {
 		code: typeof event.code === "string" ? event.code : typeof nested?.code === "string" ? nested.code : undefined,
+		errorType: typeof nested?.type === "string" ? nested.type : undefined,
 		message:
 			typeof event.message === "string"
 				? event.message
@@ -789,9 +807,13 @@ async function* mapCodexEvents(
 		if (!type) continue;
 
 		if (type === "error") {
-			const { code, message } = extractCodexEventError(event);
-			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
-				code,
+			const { code, message, errorType } = extractCodexEventError(event);
+			const errorText =
+				errorType && message
+					? `Codex ${errorType}: ${message}`
+					: `Codex error: ${message || code || JSON.stringify(event)}`;
+			throw new CodexApiError(errorText, {
+				code: code ?? errorType,
 				payload: event,
 			});
 		}

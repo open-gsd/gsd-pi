@@ -26,7 +26,7 @@ import { clearConfigValueCacheEntry, isCommandConfigValue, resolveConfigValue } 
 export type { ApiKeyCredential, OAuthCredential };
 export type AuthCredential = Credential;
 
-type AuthStorageData = Record<string, Credential>;
+type AuthStorageData = Record<string, Credential | Credential[]>;
 
 // On Windows, a just-removed lock directory can stay "delete pending" while another process
 // (antivirus, indexer, another pi checking the lock) still has it open. mkdir then fails with
@@ -534,7 +534,7 @@ export class AuthStorage implements CredentialStore {
 
 	/** GSD host synchronous credential read from the in-memory cache. */
 	get(provider: string): Credential | undefined {
-		return this.readState.data[provider];
+		return this.getCredentialsForProvider(provider)[0];
 	}
 
 	/** GSD host synchronous credential removal. */
@@ -565,10 +565,11 @@ export class AuthStorage implements CredentialStore {
 	async logout(providerId: string): Promise<void> {
 		await this.delete(providerId);
 	}
-	/** GSD: credentials for a provider (pin stores one; wrap as array for host callers). */
+	/** GSD: credentials for a provider (supports round-robin multi-key entries). */
 	getCredentialsForProvider(provider: string): Credential[] {
-		const entry = this.get(provider);
+		const entry = this.readState.data[provider];
 		if (!entry) return [];
+		if (Array.isArray(entry)) return entry;
 		return [entry];
 	}
 

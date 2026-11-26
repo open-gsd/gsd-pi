@@ -38,7 +38,16 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	// Issue #3095: the model-facing unit is MILLISECONDS, matching the sibling
+	// GSD exec tools (gsd_exec / gsd_uat_exec `timeout_ms`) that share this
+	// surface. The executor contract (BashOperations.exec) stays SECONDS —
+	// execute() below owns the single ms→s normalization.
+	timeout_ms: Type.Optional(
+		Type.Number({
+			description:
+				"Timeout in milliseconds (optional, no default timeout). 30000 = 30 seconds. Unit is milliseconds, NOT seconds.",
+		}),
+	),
 });
 
 export const bashToolSystemPromptContribution = {
@@ -229,7 +238,7 @@ function resolveSpawnContext(
 	delete env.PI_PROVIDER;
 	delete env.PI_MODEL;
 	delete env.PI_REASONING_LEVEL;
-	if (exposeSessionEnvironment && ctx) {
+	if (exposeSessionEnvironment && ctx?.sessionManager) {
 		const model = ctx.model;
 		env.PI_SESSION_ID = ctx.sessionManager.getSessionId();
 		const sessionFile = ctx.sessionManager.getSessionFile();
@@ -293,11 +302,15 @@ export function createShellToolDefinition(
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(
 			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
+			{ command, timeout_ms }: { command: string; timeout_ms?: number },
 			signal?: AbortSignal,
 			onUpdate?,
 			ctx?: ExtensionContext,
 		) {
+			const timeoutSecs =
+				typeof timeout_ms === "number" && Number.isFinite(timeout_ms) && timeout_ms > 0
+					? timeout_ms / 1000
+					: undefined;
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(
 				resolvedCommand,
@@ -402,7 +415,7 @@ export function createShellToolDefinition(
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout,
+						timeout: timeoutSecs,
 						env: spawnContext.env,
 					});
 					exitCode = result.exitCode;
