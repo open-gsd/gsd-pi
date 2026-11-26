@@ -576,12 +576,15 @@ export class AuthStorage implements CredentialStore {
 	}
 
 	set(provider: string, credential: Credential): void {
-		const merged: AuthStorageData = { ...this.readState.data, [provider]: credential };
-		this.updateReadState(merged, this.readState.revision);
+		this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			const merged: AuthStorageData = { ...currentData, [provider]: credential };
+			this.updateReadState(merged, this.authPath ? getFileRevision(this.authPath) : undefined);
+			return { result: undefined, next: JSON.stringify(merged, null, 2) };
+		});
 		if (credential.type === "api_key" && credential.key) {
 			clearConfigValueCacheEntry(credential.key);
 		}
-		void this.modify(provider, async () => credential);
 	}
 
 	setRuntimeApiKey(provider: string, apiKey: string): void {

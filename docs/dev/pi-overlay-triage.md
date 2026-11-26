@@ -25,6 +25,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-ai/src/oauth.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/api-family.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/compat-schema.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-ai/src/providers/data/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
 | `packages/pi-ai/src/providers/data/.manifest.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/data/amazon-bedrock.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-ai/src/providers/data/ant-ling.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -93,6 +94,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/constants.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/db-snapshot.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/discovery-cache.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/extension-discovery.ts` | keep-overlay | GSD getAliases host export for extension loader | no |
 | `packages/pi-coding-agent/src/core/extension-session-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/extensions/extension-upstream-types.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/extensions/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -118,6 +120,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/provider-readiness.ts` | keep-overlay | GSD external-CLI settleReadiness / isReady policy | no |
 | `packages/pi-coding-agent/src/core/radius-mcp.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/resolve-config-value.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/resource-loader.ts` | keep-overlay | Restore extensionPathsTransform for installed extensions | no |
 | `packages/pi-coding-agent/src/core/session-cwd.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/session-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/settings-diagnostics.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -133,6 +136,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/tools/render-utils.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/tools/tool-compatibility-registry.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/experimental/source-resolver.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/codemode/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
 | `packages/pi-coding-agent/src/extensions/codemode/execute.lazy.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/extensions/codemode/execute.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/extensions/codemode/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -140,6 +144,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/extensions/codemode/tool.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/extensions/codemode/worker.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/extensions/llama/ui.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/extensions/mcp/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
 | `packages/pi-coding-agent/src/extensions/mcp/cli.lazy.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/extensions/mcp/cli.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/extensions/mcp/config.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -154,6 +159,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/extensions/tool-search/tool.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/host-compat.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/theme/**` | keep-overlay | GSD host overlay for v1.6.1 pin | no |
 | `packages/pi-coding-agent/src/theme/dark.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/theme/light.json` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/theme/system-theme.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
@@ -187,5 +193,8 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-tui/src/gsd-layout.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-tui/src/index.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-tui/src/style.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-tui/src/terminal.ts` | keep-overlay | GSD isTTY / non-TTY terminal guards | no |
+| `packages/pi-tui/src/tui-main-screen-alignment.ts` | keep-overlay | GSD shrink/seam alignment helpers for differential render | no |
+| `packages/pi-tui/src/tui-main-screen.ts` | keep-overlay | GSD differential main-screen render port | no |
 | `packages/pi-tui/src/tui.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 
