@@ -86,6 +86,7 @@
     "packages/pi-coding-agent/src/core/models-json-writer.ts",
     "packages/pi-coding-agent/src/core/package-commands.ts",
     "packages/pi-coding-agent/src/core/package-manager.ts",
+    "packages/pi-coding-agent/src/core/provider-display-names.ts",
     "packages/pi-coding-agent/src/core/radius-mcp.ts",
     "packages/pi-coding-agent/src/core/resolve-config-value.ts",
     "packages/pi-coding-agent/src/core/session-manager.ts",

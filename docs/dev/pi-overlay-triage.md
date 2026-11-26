@@ -112,6 +112,7 @@ Disposition of every allowlisted overlay file after the v1.6.1 pin.
 | `packages/pi-coding-agent/src/core/models-json-writer.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/package-commands.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/package-manager.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
+| `packages/pi-coding-agent/src/core/provider-display-names.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/radius-mcp.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/resolve-config-value.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |
 | `packages/pi-coding-agent/src/core/session-cwd.ts` | keep-overlay | v1.6.1 pin port or GSD-only | no |

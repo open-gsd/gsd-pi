@@ -99,6 +99,7 @@ Every row must have a matching entry in `scripts/pi-upstream.json` → `patchAll
 | Config value helpers | `packages/pi-coding-agent/src/core/resolve-config-value.ts` | Allowed command prefix resolution |
 | Skills loader | `packages/pi-coding-agent/src/core/skills.ts` | Host skill discovery re-exports |
 | Shell helpers | `packages/pi-coding-agent/src/utils/shell.ts` | Process-tree kill + command sanitize |
+| Provider display names | `packages/pi-coding-agent/src/core/provider-display-names.ts` | Built-in provider label map for interactive auth selectors |
 | Tool argument normalization tests | `packages/pi-ai/src/utils/tests/normalize-tool-arguments.test.ts` | Regression coverage for shared validation/transcript argument normalization |
 | **Claude tool schemas** | `packages/pi-ai/src/providers/google-shared.ts` | Cloud Code Assist / Claude `input_schema` sanitization (`toClaudeInputSchemaRoot`, `normalizeClaudeToolSchemaForGoogle`) |
 | **Claude schema tests** | `packages/pi-ai/test/google-shared-convert-tools.test.ts`, `src/resources/extensions/gsd/tests/claude-tool-schema-golden.test.ts` | Golden B regression |
