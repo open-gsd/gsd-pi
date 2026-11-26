@@ -45,10 +45,7 @@ jobs:
         run: |
           # Write the report to a file — never put multi-MB markdown into
           # GITHUB_OUTPUT / env (ARG_MAX on large engine sync PRs).
-          set +e
-          node scripts/pr-risk-check.mjs --github < /tmp/changed-files.txt > /tmp/risk-report.md
-          status=$?
-          set -e
+          node scripts/pr-risk-check.mjs --github < /tmp/changed-files.txt > /tmp/risk-report.md || true
 
           RISK_LEVEL=$(node scripts/pr-risk-check.mjs --json < /tmp/changed-files.txt 2>/dev/null \
             | node -e "let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{ try { console.log(JSON.parse(d).risk) } catch { console.log('low') } })" \
@@ -63,7 +60,6 @@ jobs:
             echo ""
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          exit 0
 
       - name: Write step summary
         run: |
