@@ -60,6 +60,14 @@
       "import": "./dist/lazy-oauth.js"
     }
   },
+  "bin": {
+    "pi-ai": "./bin/pi-ai.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "generate-models": "node scripts/generate-models.ts",
     "generate-image-models": "node scripts/generate-image-models.ts",
