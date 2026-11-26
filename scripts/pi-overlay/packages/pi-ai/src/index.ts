@@ -63,3 +63,4 @@ export {
 	resetApiProviders,
 	streamSimple,
 } from "./compat.js";
+export * from "./host-compat.js";

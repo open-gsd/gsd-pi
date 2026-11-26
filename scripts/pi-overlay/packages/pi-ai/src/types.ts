@@ -601,6 +601,8 @@ export interface ModelRouting {
 	tier?: "light" | "standard" | "heavy";
 	reason?: string;
 	source?: string;
+	/** GSD compat: set when routing fell back to a cheaper/smaller model. */
+	modelDowngraded?: boolean;
 }
 
 export interface AssistantMessage {
@@ -635,6 +637,8 @@ export interface AssistantMessage {
 	 * for deferred results fetched later.
 	 */
 	durationMs?: number;
+	/** GSD compat: optional inference metrics attached by host providers (e.g. ollama). */
+	inferenceMetrics?: Record<string, unknown>;
 }
 
 /** A tool call that another tool made while it ran, for example from a codemode script. */
@@ -878,6 +882,8 @@ export interface BaseModel<TApi extends string> {
 	inputLimits?: ModelInputLimits;
 	cost: ModelCost;
 	headers?: Record<string, string>;
+	/** GSD compat: provider-specific options attached by host registration. */
+	providerOptions?: Record<string, unknown>;
 }
 
 /** Chat model: usable with `stream()` and friends. */

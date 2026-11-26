@@ -1132,6 +1132,26 @@ export class SettingsManager {
 		return this.settings.shellCommandPrefix;
 	}
 
+	getAllowedCommandPrefixes(): string[] | undefined {
+		return this.settings.allowedCommandPrefixes;
+	}
+
+	setAllowedCommandPrefixes(prefixes: string[]): void {
+		this.globalSettings.allowedCommandPrefixes = prefixes;
+		this.markModified("allowedCommandPrefixes");
+		this.save();
+	}
+
+	getFetchAllowedUrls(): string[] | undefined {
+		return this.settings.fetchAllowedUrls;
+	}
+
+	setFetchAllowedUrls(urls: string[]): void {
+		this.globalSettings.fetchAllowedUrls = urls;
+		this.markModified("fetchAllowedUrls");
+		this.save();
+	}
+
 	setShellCommandPrefix(prefix: string | undefined): void {
 		this.globalSettings.shellCommandPrefix = prefix;
 		this.markModified("shellCommandPrefix");

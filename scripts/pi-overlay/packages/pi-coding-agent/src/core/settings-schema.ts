@@ -310,6 +310,8 @@ export const SettingsSchema = Type.Object(
 				default: SETTINGS_DEFAULTS.defaultProjectTrust,
 			}),
 		),
+		allowedCommandPrefixes: Type.Optional(Type.Array(Type.String())),
+		fetchAllowedUrls: Type.Optional(Type.Array(Type.String())),
 		shellCommandPrefix: Type.Optional(
 			Type.String({ description: "Prefix prepended to every bash command, for example to enable shell aliases." }),
 		),

@@ -60,11 +60,37 @@ import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../theme/theme.js";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.js";
 import type {
+	AdjustToolSetEvent,
+	AdjustToolSetResult,
+	BeforeModelSelectEvent,
+	BeforeModelSelectResult,
+	GsdExtensionEvent,
+	NotificationEvent,
+	PhaseChangeEvent,
+	SessionEndEvent,
+	SessionForkEvent,
+	SessionSwitchEvent,
+	StopEvent,
+	ToolFormatValidationErrorEvent,
+	ToolFormatValidationErrorEventResult,
+	ToolPreparationErrorsTurnEvent,
+	ToolPreparationErrorsTurnEventResult,
+} from "../gsd-extension-types.js";
+import type {
 	BashResult,
 	CompactionPreparation,
 	CompactionResult,
 } from "../gsd-seam-types.js";
 import type { EventBus } from "../event-bus.js";
+
+/** GSD lifecycle hook handler (local type to avoid bootstrap dep on @gsd/agent-core). */
+export type LifecycleHookHandler = (ctx: {
+	phase?: "beforeInstall" | "afterInstall" | "beforeRemove" | "afterRemove";
+	scope?: "user" | "project";
+	source?: string;
+	cwd?: string;
+	[key: string]: unknown;
+}) => void | Promise<void>;
 import type { ExecOptions, ExecResult } from "../exec.js";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.js";
 import type { KeybindingsManager } from "../keybindings.js";
@@ -401,6 +427,8 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/** GSD compat: override compaction threshold for this session. */
+	setCompactionThresholdOverride?(percent?: number): void;
 }
 
 /** Options for {@link ExtensionToolContext.executeTool}. */
@@ -447,6 +475,8 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Start a new session, optionally with initialization. */
 	newSession(options?: {
 		parentSession?: string;
+		workspaceRoot?: string;
+		abortSignal?: AbortSignal;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }>;
@@ -940,6 +970,8 @@ export interface ContextWithSystemEvent {
 export interface BeforeProviderRequestEvent {
 	type: "before_provider_request";
 	payload: unknown;
+	/** GSD compat: model for the outgoing request when known. */
+	model?: Model<any>;
 }
 
 /**
@@ -1007,6 +1039,8 @@ export interface AgentStartEvent {
 export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
+	/** GSD compat: true when the aborted turn will be retried (overflow recovery). */
+	willRetry?: boolean;
 }
 
 export type AgentActivityOutcome = "completed" | "aborted" | "error";
@@ -1861,7 +1895,7 @@ export interface ExtensionAPI {
 	 * Set the model for the current session without changing the configured default for new sessions.
 	 * Returns false if authentication is not configured for the model's provider.
 	 */
-	setModel(model: Model<any>): Promise<boolean>;
+	setModel(model: Model<any>, options?: { persist?: boolean }): Promise<boolean>;
 
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel;
@@ -1870,7 +1904,52 @@ export interface ExtensionAPI {
 	 * Set the thinking level (clamped to model capabilities) for the current session without changing the configured default
 	 * for new sessions.
 	 */
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ThinkingLevel, options?: { persist?: boolean }): void;
+
+	retryLastTurn(): void;
+	getVisibleSkills(): string[] | undefined;
+	setVisibleSkills(skillNames: string[] | undefined): void;
+	emitBeforeModelSelect(event: Omit<BeforeModelSelectEvent, "type">): Promise<BeforeModelSelectResult | undefined>;
+	emitAdjustToolSet(event: Omit<AdjustToolSetEvent, "type">): Promise<AdjustToolSetResult | undefined>;
+	emitExtensionEvent(
+		event: ExtensionEvent | GsdExtensionEvent | ({ type: string } & Record<string, unknown>),
+	): Promise<unknown>;
+
+	// =========================================================================
+	// GSD host events
+	// =========================================================================
+
+	on(event: "session_switch", handler: ExtensionHandler<SessionSwitchEvent>): () => void;
+	on(event: "session_fork", handler: ExtensionHandler<SessionForkEvent>): () => void;
+	on(event: "session_end", handler: ExtensionHandler<SessionEndEvent>): () => void;
+	on(event: "stop", handler: ExtensionHandler<StopEvent>): () => void;
+	on(
+		event: "before_model_select",
+		handler: ExtensionHandler<BeforeModelSelectEvent, BeforeModelSelectResult>,
+	): () => void;
+	on(
+		event: "adjust_tool_set",
+		handler: ExtensionHandler<AdjustToolSetEvent, AdjustToolSetResult>,
+	): () => void;
+	on(event: "notification", handler: ExtensionHandler<NotificationEvent>): () => void;
+	on(event: "phase_change", handler: ExtensionHandler<PhaseChangeEvent>): () => void;
+	on(
+		event: "tool_format_validation_error",
+		handler: ExtensionHandler<ToolFormatValidationErrorEvent, ToolFormatValidationErrorEventResult>,
+	): () => void;
+	on(
+		event: "tool_preparation_errors_turn",
+		handler: ExtensionHandler<ToolPreparationErrorsTurnEvent, ToolPreparationErrorsTurnEventResult>,
+	): () => void;
+
+	// =========================================================================
+	// GSD lifecycle hooks (npm package install/remove)
+	// =========================================================================
+
+	registerBeforeInstall(handler: LifecycleHookHandler): void;
+	registerAfterInstall(handler: LifecycleHookHandler): void;
+	registerBeforeRemove(handler: LifecycleHookHandler): void;
+	registerAfterRemove(handler: LifecycleHookHandler): void;
 
 	// =========================================================================
 	// Provider Registration
@@ -2004,6 +2083,10 @@ export interface ExtensionVirtualModel<TState = unknown> extends Omit<VirtualMod
 export interface ProviderConfig {
 	/** Display name for the provider in UI. */
 	name?: string;
+	/** GSD compat: how auth is presented for this provider. */
+	authMode?: "apiKey" | "oauth" | "none";
+	/** GSD compat: readiness probe used by host registration. */
+	isReady?: () => boolean;
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
 	/** API key literal, env interpolation ($ENV_VAR or ${ENV_VAR}), or leading !command. Required when defining models (unless oauth provided). */
@@ -2062,6 +2145,8 @@ export interface ProviderConfig {
 interface ProviderModelConfigBase {
 	/** Model ID. */
 	id: string;
+	/** GSD compat: provider-specific options attached to registered models. */
+	providerOptions?: Record<string, unknown>;
 	/** Display name. */
 	name: string;
 	/** API type override for this model. */
@@ -2212,11 +2297,11 @@ export type SetActiveToolsHandler = (toolNames: string[]) => void;
 
 export type RefreshToolsHandler = () => void;
 
-export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
+export type SetModelHandler = (model: Model<any>, options?: { persist?: boolean }) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 
-export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
+export type SetThinkingLevelHandler = (level: ThinkingLevel, options?: { persist?: boolean }) => void;
 
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 
@@ -2280,6 +2365,16 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	retryLastTurn: () => void;
+	getVisibleSkills: () => string[] | undefined;
+	setVisibleSkills: (skillNames: string[] | undefined) => void;
+	emitBeforeModelSelect: (
+		event: Omit<BeforeModelSelectEvent, "type">,
+	) => Promise<BeforeModelSelectResult | undefined>;
+	emitAdjustToolSet: (event: Omit<AdjustToolSetEvent, "type">) => Promise<AdjustToolSetResult | undefined>;
+	emitExtensionEvent: (
+		event: ExtensionEvent | GsdExtensionEvent | ({ type: string } & Record<string, unknown>),
+	) => Promise<unknown>;
 }
 
 /**
@@ -2298,6 +2393,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
+	setCompactionThresholdOverride?: (percent?: number) => void;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
 	/** Backs `ExtensionToolContext.executeTool()`. Without it, nested calls fail. */
 	executeTool?: (
@@ -2318,6 +2414,8 @@ export interface ExtensionCommandContextActions {
 	waitForIdle: () => Promise<void>;
 	newSession: (options?: {
 		parentSession?: string;
+		workspaceRoot?: string;
+		abortSignal?: AbortSignal;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}) => Promise<{ cancelled: boolean }>;
@@ -2362,6 +2460,12 @@ export interface Extension {
 	runtimeReads: Map<string, RuntimeReadHandler>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	lifecycleHooks?: {
+		beforeInstall: LifecycleHookHandler[];
+		afterInstall: LifecycleHookHandler[];
+		beforeRemove: LifecycleHookHandler[];
+		afterRemove: LifecycleHookHandler[];
+	};
 }
 
 export type RuntimeReadHandler = (input: unknown) => Promise<unknown>;

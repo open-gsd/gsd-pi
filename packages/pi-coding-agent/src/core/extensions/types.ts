@@ -81,8 +81,16 @@ import type {
 	CompactionPreparation,
 	CompactionResult,
 } from "../gsd-seam-types.js";
-import type { LifecycleHookHandler } from "@gsd/agent-core/lifecycle-hooks.js";
 import type { EventBus } from "../event-bus.js";
+
+/** GSD lifecycle hook handler (local type to avoid bootstrap dep on @gsd/agent-core). */
+export type LifecycleHookHandler = (ctx: {
+	phase?: "beforeInstall" | "afterInstall" | "beforeRemove" | "afterRemove";
+	scope?: "user" | "project";
+	source?: string;
+	cwd?: string;
+	[key: string]: unknown;
+}) => void | Promise<void>;
 import type { ExecOptions, ExecResult } from "../exec.js";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.js";
 import type { KeybindingsManager } from "../keybindings.js";
