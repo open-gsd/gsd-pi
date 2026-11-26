@@ -74,9 +74,15 @@ export function buildLoginProviderOptions(host: InteractiveModeDelegateHost): Au
 	const allOAuthProviders = modelRegistry.authStorage.getOAuthProviders();
 	const oauthProviders = allOAuthProviders.filter((provider) => isBrowserOAuthProviderAllowed(provider.id));
 	const oauthProviderIds = new Set(oauthProviders.map((provider) => provider.id));
-	const apiKeyOnlyOAuthProviderIds = new Set(
-		allOAuthProviders.filter((provider) => !isBrowserOAuthProviderAllowed(provider.id)).map((provider) => provider.id),
-	);
+	// Always include blocked browser-OAuth providers (e.g. anthropic) even when
+	// the OAuth registry stub is empty under Pi v1.6.1 — they must still appear
+	// as API-key login options with plain provider naming.
+	const apiKeyOnlyOAuthProviderIds = new Set([
+		...allOAuthProviders
+			.filter((provider) => !isBrowserOAuthProviderAllowed(provider.id))
+			.map((provider) => provider.id),
+		...BLOCKED_BROWSER_OAUTH_PROVIDERS,
+	]);
 	const modelProviderIds = Array.from(new Set(modelRegistry.getAll().map((model) => model.provider))).sort();
 
 	const externalCliProviders = modelProviderIds

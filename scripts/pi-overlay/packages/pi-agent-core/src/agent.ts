@@ -212,6 +212,13 @@ export class Agent {
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	public streamFunction: StreamFn;
+	/** Host-compat alias for {@link streamFunction} (pre-v1.6.1 property name). */
+	get streamFn(): StreamFn {
+		return this.streamFunction;
+	}
+	set streamFn(fn: StreamFn) {
+		this.streamFunction = fn;
+	}
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];

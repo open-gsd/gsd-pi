@@ -1,3 +1,9 @@
+import { setDefaultStreamFn } from "@gsd/pi-agent-core";
+import { streamSimple } from "@gsd/pi-ai";
+
+// Host-compat: Pi v1.6.1 Agent requires a default streamFn (main defaulted to streamSimple).
+setDefaultStreamFn(streamSimple);
+
 export {
 	AgentSession,
 	type AgentSessionConfig,
