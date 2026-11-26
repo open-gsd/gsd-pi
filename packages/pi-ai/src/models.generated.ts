@@ -6880,13 +6880,12 @@ export const MODELS = {
 		"gpt-6.1-terra": {
 			id: "gpt-6.1-terra",
 			name: "GPT-6.1 Terra",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
 			baseUrl: "https://api.individual.githubcopilot.com",
 			headers: {"User-Agent":"GitHubCopilotChat/0.35.0","Editor-Version":"vscode/1.107.0","Editor-Plugin-Version":"copilot-chat/0.35.0","Copilot-Integration-Id":"vscode-chat"},
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false},
 			reasoning: true,
-			thinkingLevelMap: {"minimal":"low","xhigh":"xhigh"},
+			thinkingLevelMap: {"off":null,"minimal":"low","xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 1,
@@ -6894,9 +6893,9 @@ export const MODELS = {
 				cacheRead: 0.05,
 				cacheWrite: 1.25,
 			},
-			contextWindow: 1050000,
+			contextWindow: 400000,
 			maxTokens: 128000,
-		} satisfies Model<"openai-completions">,
+		} satisfies Model<"openai-responses">,
 		"grok-4.5": {
 			id: "grok-4.5",
 			name: "Grok 4.5",

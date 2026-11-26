@@ -12,7 +12,7 @@ import { MODELS } from "../src/models.generated.ts";
 import { calculateCost } from "../src/models.ts";
 
 describe("Copilot GPT-6 generator routing", () => {
-	for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra"]) {
+	for (const id of ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]) {
 		test(`normalizes ingested or synthesized ${id} without changing model limits`, () => {
 			const model = {
 				id,
@@ -33,6 +33,7 @@ describe("Copilot GPT-6 generator routing", () => {
 
 	for (const [provider, id, api] of [
 		["openai", "gpt-6-luna", "openai-completions"],
+		["openai", "gpt-6.1-terra", "openai-completions"],
 		["github-copilot", "gpt-5.4", "openai-responses"],
 		["github-copilot", "gpt-6-luna-preview", "openai-completions"],
 	]) {
@@ -123,6 +124,7 @@ describe("models.generated.ts", () => {
 				"gpt-6-sol",
 				"gpt-6-luna",
 				"gpt-6.1-sol",
+				"gpt-6.1-terra",
 				"vendor/gpt-6-astra-suffix",
 			]) {
 				expect(evaluate({ provider, id }), `${provider}/${id}`).toEqual({
@@ -131,12 +133,12 @@ describe("models.generated.ts", () => {
 				});
 			}
 		}
-		expect(evaluate({ provider: "github-copilot", id: "gpt-6-astra" })).toEqual(
-			{
+		for (const id of ["gpt-6-astra", "gpt-6.1-terra"]) {
+			expect(evaluate({ provider: "github-copilot", id }), id).toEqual({
 				xhigh: true,
 				max: true,
-			},
-		);
+			});
+		}
 		for (const provider of ["openai", "github-copilot", "custom-proxy"]) {
 			expect(evaluate({ provider, id: "gpt-5.6-sol" })).toEqual({
 				xhigh: true,
@@ -397,7 +399,7 @@ describe("models.generated.ts", () => {
 	});
 
 	test("maps Copilot's responses-only models to the Responses API with served limits", () => {
-		// Live Copilot /models catalog (verified 2026-10-07): these models list
+		// Live Copilot /models catalog (see also #3198 for Terra): these models list
 		// supported_endpoints without /chat/completions. A bundled
 		// openai-completions entry hard-400s every dispatch with
 		// "unsupported_api_for_model", and the completions-only compat block
@@ -408,6 +410,7 @@ describe("models.generated.ts", () => {
 			"gpt-6-luna",
 			"gpt-6-sol",
 			"gpt-6.1-sol",
+			"gpt-6.1-terra",
 		] as const;
 		const grokIds = ["grok-4.5", "grok-4.6", "grok-4.7"] as const;
 		for (const id of [...gpt6Ids, ...grokIds]) {
@@ -461,6 +464,7 @@ describe("models.generated.ts", () => {
 			["openai", "gpt-6-sol"],
 			["openai", "gpt-6-luna"],
 			["openai", "gpt-6.1-sol"],
+			["openai", "gpt-6.1-terra"],
 		];
 		for (const [provider, id] of nonCopilotGpt6) {
 			const model = (
