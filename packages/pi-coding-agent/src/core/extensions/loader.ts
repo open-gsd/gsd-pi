@@ -146,6 +146,40 @@ export function clearExtensionCache(): void {
 	extensionCacheGeneration++;
 }
 
+/**
+ * Import a module relative to an extension's parent URL using the same jiti
+ * resolution path as extension loading (aliases / virtual modules).
+ */
+export async function importExtensionModule<T = unknown>(parentModuleUrl: string, specifier: string): Promise<T> {
+	const createJitiImpl = await getCreateJiti();
+	const resolutionOptions = usesEmbeddedModules
+		? { virtualModules: await getVirtualModules(), tryNative: false }
+		: isTypeScriptSourceRuntime
+			? { virtualModules: await getVirtualModules(), tsconfigPaths: true }
+			: { alias: getAliases() };
+	const jiti = createJitiImpl(parentModuleUrl, {
+		moduleCache: true,
+		...resolutionOptions,
+	});
+	const resolvedPath = fileURLToPath(new URL(specifier, parentModuleUrl));
+	return jiti.import(resolvedPath) as Promise<T>;
+}
+
+/** Register additional virtual modules available to extension imports. */
+export function registerExtensionBundledModules(modules: Record<string, unknown>): void {
+	// Sync-load so callers can register before the first extension import.
+	// Avoid a top-level import (virtual-modules → index → loader cycle).
+	const virtualModulesPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "virtual-modules.js");
+	const { VIRTUAL_MODULES } = require(virtualModulesPath) as {
+		VIRTUAL_MODULES: Record<string, unknown>;
+	};
+	for (const [specifier, mod] of Object.entries(modules)) {
+		VIRTUAL_MODULES[specifier] = mod;
+	}
+	virtualModulesPromise = Promise.resolve(VIRTUAL_MODULES);
+	_aliases = null;
+}
+
 function useExtensionCacheCwd(cwd: string): ExtensionCacheToken {
 	const resolvedCwd = resolvePath(cwd);
 	if (extensionCacheCwd !== undefined && !pathsEqual(extensionCacheCwd, resolvedCwd)) {
@@ -188,6 +222,12 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
+		retryLastTurn: notInitialized,
+		getVisibleSkills: () => undefined,
+		setVisibleSkills: () => {},
+		emitBeforeModelSelect: async () => undefined,
+		emitAdjustToolSet: async () => undefined,
+		emitExtensionEvent: async () => undefined,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		pendingNativeProviderRegistrations: [],
@@ -455,9 +495,9 @@ function createExtensionAPI(
 			return runtime.getCommands();
 		},
 
-		setModel(model) {
+		setModel(model, options) {
 			assertActive();
-			return runtime.setModel(model);
+			return runtime.setModel(model, options);
 		},
 
 		getThinkingLevel() {
@@ -465,9 +505,60 @@ function createExtensionAPI(
 			return runtime.getThinkingLevel();
 		},
 
-		setThinkingLevel(level) {
+		setThinkingLevel(level, options) {
 			assertActive();
-			runtime.setThinkingLevel(level);
+			runtime.setThinkingLevel(level, options);
+		},
+
+		retryLastTurn() {
+			assertActive();
+			runtime.retryLastTurn();
+		},
+
+		getVisibleSkills() {
+			assertActive();
+			return runtime.getVisibleSkills();
+		},
+
+		setVisibleSkills(skillNames) {
+			assertActive();
+			runtime.setVisibleSkills(skillNames);
+		},
+
+		emitBeforeModelSelect(event) {
+			assertActive();
+			return runtime.emitBeforeModelSelect(event);
+		},
+
+		emitAdjustToolSet(event) {
+			assertActive();
+			return runtime.emitAdjustToolSet(event);
+		},
+
+		emitExtensionEvent(event) {
+			assertActive();
+			return runtime.emitExtensionEvent(event);
+		},
+
+		registerBeforeInstall(handler) {
+			assertActive();
+			extension.lifecycleHooks ??= { beforeInstall: [], afterInstall: [], beforeRemove: [], afterRemove: [] };
+			extension.lifecycleHooks.beforeInstall.push(handler);
+		},
+		registerAfterInstall(handler) {
+			assertActive();
+			extension.lifecycleHooks ??= { beforeInstall: [], afterInstall: [], beforeRemove: [], afterRemove: [] };
+			extension.lifecycleHooks.afterInstall.push(handler);
+		},
+		registerBeforeRemove(handler) {
+			assertActive();
+			extension.lifecycleHooks ??= { beforeInstall: [], afterInstall: [], beforeRemove: [], afterRemove: [] };
+			extension.lifecycleHooks.beforeRemove.push(handler);
+		},
+		registerAfterRemove(handler) {
+			assertActive();
+			extension.lifecycleHooks ??= { beforeInstall: [], afterInstall: [], beforeRemove: [], afterRemove: [] };
+			extension.lifecycleHooks.afterRemove.push(handler);
 		},
 
 		registerProvider(providerOrName: Provider | string, config?: ProviderConfig) {

@@ -381,6 +381,7 @@ export class ExtensionRunner {
 	private hasPendingMessagesFn: () => boolean = () => false;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
+	private setCompactionThresholdOverrideFn: (percent?: number) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () =>
 		normalizeBuildSystemPromptOptions({ cwd: this.cwd });
@@ -417,6 +418,10 @@ export class ExtensionRunner {
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
+		this.runtime.emitBeforeModelSelect = (event) => this.emitBeforeModelSelect(event);
+		this.runtime.emitAdjustToolSet = (event) => this.emitAdjustToolSet(event);
+		this.runtime.emitExtensionEvent = (event) =>
+			this.emitExtensionEventDynamic(event as { type: string } & Record<string, unknown>);
 	}
 
 	bindCore(
@@ -446,6 +451,9 @@ export class ExtensionRunner {
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
+		this.runtime.retryLastTurn = actions.retryLastTurn;
+		this.runtime.getVisibleSkills = actions.getVisibleSkills;
+		this.runtime.setVisibleSkills = actions.setVisibleSkills;
 		this.runtime.createContext = () => this.createContext();
 
 		// Context actions (required)
@@ -460,6 +468,7 @@ export class ExtensionRunner {
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
+		this.setCompactionThresholdOverrideFn = contextActions.setCompactionThresholdOverride ?? (() => {});
 		this.getSystemPromptOptionsFn =
 			contextActions.getSystemPromptOptions ?? (() => normalizeBuildSystemPromptOptions({ cwd: this.cwd }));
 		this.executeToolFn = contextActions.executeTool;
@@ -988,6 +997,10 @@ export class ExtensionRunner {
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
+			},
+			setCompactionThresholdOverride: (percent?: number) => {
+				runner.assertActive();
+				runner.setCompactionThresholdOverrideFn(percent);
 			},
 		};
 	}
@@ -1610,7 +1623,8 @@ export class ExtensionRunner {
 	}
 
 	/** GSD: forward dynamic extension events through the generic emitter when recognized. */
-	async emitExtensionEventDynamic(event: { type: string } & Record<string, unknown>): Promise<void> {
+	async emitExtensionEventDynamic(event: { type: string } & Record<string, unknown>): Promise<unknown> {
 		await this.emit(event as RunnerEmitEvent);
+		return undefined;
 	}
 }

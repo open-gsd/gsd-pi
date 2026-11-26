@@ -284,6 +284,12 @@ export class ModelRegistry {
 		}
 	}
 
+	/** GSD compat alias for {@link getApiKeyForProvider}; accepts a provider id or model. */
+	async getApiKey(providerOrModel: string | Model<Api>): Promise<string | undefined> {
+		const provider = typeof providerOrModel === "string" ? providerOrModel : providerOrModel.provider;
+		return this.getApiKeyForProvider(provider);
+	}
+
 	isUsingOAuth(model: Model<Api>): boolean {
 		return this.runtime.isUsingOAuth(model.provider);
 	}

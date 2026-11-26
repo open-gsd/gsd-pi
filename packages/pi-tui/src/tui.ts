@@ -300,6 +300,8 @@ export interface OverlayOptions {
 	visible?: (termWidth: number, termHeight: number) => boolean;
 	/** If true, don't capture keyboard focus when shown */
 	nonCapturing?: boolean;
+	/** GSD compat: reserve layout space for the overlay content. */
+	reserveSpace?: boolean;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */

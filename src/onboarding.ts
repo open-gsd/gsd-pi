@@ -344,7 +344,7 @@ export async function runOnboarding(
   const summaryLines: string[] = []
   if (llmConfigured) {
     // Re-read what provider was stored
-    const authed = authStorage.list().filter(id => LLM_PROVIDER_IDS.includes(id))
+    const authed = authStorage.listProviders().filter(id => LLM_PROVIDER_IDS.includes(id))
     if (authed.length > 0) {
       const name = authed[0]
       summaryLines.push(`${pc.green('✓')} LLM provider: ${name}`)
@@ -836,7 +836,7 @@ async function runWebSearchStep(
   isAnthropicAuth: boolean,
 ): Promise<string | null> {
   // Check which LLM provider was configured
-  const authed = authStorage.list().filter(id => LLM_PROVIDER_IDS.includes(id))
+  const authed = authStorage.listProviders().filter(id => LLM_PROVIDER_IDS.includes(id))
   const isAnthropic = isAnthropicAuth && authed.includes('anthropic')
 
   // Check if web search is already configured

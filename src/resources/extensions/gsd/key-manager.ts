@@ -711,7 +711,7 @@ export async function handleRotateKey(
   }
 
   // Show current key(s)
-  const currentDesc = apiKeyCreds.map((c) => maskKey(c.key)).join(", ");
+  const currentDesc = apiKeyCreds.map((c) => maskKey(c.key ?? "")).join(", ");
   ctx.ui.notify(`Current key${apiKeyCreds.length > 1 ? "s" : ""}: ${currentDesc}`, "info");
 
   // Prompt for new key
@@ -897,8 +897,9 @@ export function runKeyDoctor(auth: AuthStorage): DoctorFinding[] {
   for (const provider of PROVIDER_REGISTRY) {
     const creds = auth.getCredentialsForProvider(provider.id);
     for (const cred of creds) {
-      if (cred.type === "api_key" && (cred as ApiKeyCredential).key) {
+      if (cred.type === "api_key") {
         const key = (cred as ApiKeyCredential).key;
+        if (!key) continue;
         const existing = keyToProviders.get(key) ?? [];
         existing.push(provider.id);
         keyToProviders.set(key, existing);

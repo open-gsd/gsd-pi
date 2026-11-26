@@ -189,10 +189,10 @@ export function synthesizeCopilotOverlayEntry(record: CopilotModelRecord): Model
         ? {
             tiers: longContextTiers.map((tier) => ({
               inputTokensAbove: tier.inputTokensAbove,
-              ...(tier.inputPer1k !== undefined ? { input: toPerMillion(tier.inputPer1k) } : {}),
-              ...(tier.outputPer1k !== undefined ? { output: toPerMillion(tier.outputPer1k) } : {}),
-              ...(tier.cacheReadPer1k !== undefined ? { cacheRead: toPerMillion(tier.cacheReadPer1k) } : {}),
-              ...(tier.cacheWritePer1k !== undefined ? { cacheWrite: toPerMillion(tier.cacheWritePer1k) } : {}),
+              input: toPerMillion(tier.inputPer1k ?? inputPer1k),
+              output: toPerMillion(tier.outputPer1k ?? outputPer1k),
+              cacheRead: toPerMillion(tier.cacheReadPer1k ?? cacheReadPer1k),
+              cacheWrite: toPerMillion(tier.cacheWritePer1k ?? cacheWritePer1k),
             })),
           }
         : {}),

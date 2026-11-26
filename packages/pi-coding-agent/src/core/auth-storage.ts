@@ -3,8 +3,15 @@
  * Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
  */
 
-import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@gsd/pi-ai";
-import { getOAuthProviders, type OAuthProviderInterface } from "@gsd/pi-ai/oauth";
+import type {
+	ApiKeyCredential,
+	AuthOperationOptions,
+	Credential,
+	CredentialInfo,
+	CredentialStore,
+	OAuthCredential,
+} from "@gsd/pi-ai";
+import { getOAuthProviders, type OAuthLoginCallbacks, type OAuthProviderInterface } from "@gsd/pi-ai/oauth";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -14,6 +21,10 @@ import { raceWithAbortSignal } from "../utils/abort.js";
 import { getFileRevision, normalizePath } from "../utils/paths.js";
 import { stripBom } from "../utils/text.js";
 import { clearConfigValueCacheEntry, isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.js";
+
+/** GSD host aliases for credential shapes. */
+export type { ApiKeyCredential, OAuthCredential };
+export type AuthCredential = Credential;
 
 type AuthStorageData = Record<string, Credential>;
 
@@ -508,6 +519,19 @@ export class AuthStorage implements CredentialStore {
 		return entries.map(([providerId, credential]) => ({ providerId, type: credential.type }));
 	}
 
+	/** GSD: sync credential listing from the in-memory cache. */
+	listSync(): readonly CredentialInfo[] {
+		return Object.entries(this.readState.data).map(([providerId, credential]) => ({
+			providerId,
+			type: credential.type,
+		}));
+	}
+
+	/** GSD: sync provider ids with stored credentials (main-compat `list()`). */
+	listProviders(): string[] {
+		return Object.keys(this.readState.data);
+	}
+
 	/** GSD host synchronous credential read from the in-memory cache. */
 	get(provider: string): Credential | undefined {
 		return this.readState.data[provider];
@@ -534,14 +558,44 @@ export class AuthStorage implements CredentialStore {
 		return getOAuthProviders();
 	}
 
-	async login(_providerId: string, _callbacks?: unknown): Promise<void> {
+	async login(_providerId: string, _callbacks?: OAuthLoginCallbacks): Promise<void> {
 		throw new Error("OAuth login is handled through ModelRuntime in pi v1.6.1");
 	}
 
 	async logout(providerId: string): Promise<void> {
 		await this.delete(providerId);
 	}
+	/** GSD: credentials for a provider (pin stores one; wrap as array for host callers). */
+	getCredentialsForProvider(provider: string): Credential[] {
+		const entry = this.get(provider);
+		if (!entry) return [];
+		return [entry];
+	}
+
+	/** GSD: alias for hasAuth. */
+	has(provider: string): boolean {
+		return this.hasAuth(provider);
+	}
+
+	/** GSD: whether every credential for the provider is in backoff. */
+	areAllCredentialsBackedOff(provider: string): boolean {
+		return !this.isProviderAvailable(provider);
+	}
+
+	/** GSD: remaining backoff ms (0 when available). */
+	getProviderBackoffRemaining(provider: string): number {
+		return this.isProviderAvailable(provider) ? 0 : 60_000;
+	}
+
+	/** GSD: resolve a usable API key without OAuth refresh. */
+	async getApiKey(providerId: string, _options?: { includeFallback?: boolean }): Promise<string | undefined> {
+		const cred = this.get(providerId);
+		if (!cred) return undefined;
+		if (cred.type === "api_key") return cred.key;
+		return undefined;
+	}
 }
+
 
 /**
  * One-off synchronous read of a stored credential from an auth.json file,

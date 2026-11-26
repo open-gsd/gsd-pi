@@ -76,7 +76,7 @@ function getBaseUrlFromToken(token: string): string | null {
 	return `https://${apiHost}`;
 }
 
-function getGitHubCopilotBaseUrl(token?: string, enterpriseDomain?: string): string {
+export function getGitHubCopilotBaseUrl(token?: string, enterpriseDomain?: string): string {
 	// If we have a token, extract the base URL from proxy-ep
 	if (token) {
 		const urlFromToken = getBaseUrlFromToken(token);

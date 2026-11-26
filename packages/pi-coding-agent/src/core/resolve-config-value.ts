@@ -6,6 +6,37 @@
 import { execSync, spawnSync } from "child_process";
 import { getShellConfig } from "../utils/shell.js";
 
+/** Safe default prefixes for `!command` config values (GSD host allowlist). */
+export const SAFE_COMMAND_PREFIXES = [
+	"pass",
+	"op",
+	"aws",
+	"gcloud",
+	"vault",
+	"security",
+	"gpg",
+	"bw",
+	"gopass",
+	"lpass",
+];
+
+/** Active command prefix allowlist (overridable via settings or env). */
+let activeCommandPrefixes: string[] = [...SAFE_COMMAND_PREFIXES];
+
+export function setAllowedCommandPrefixes(prefixes: string[]): void {
+	if (prefixes.length === 0) {
+		process.stderr.write(
+			"[resolve-config-value] Warning: empty command prefix allowlist — all !commands will be blocked\n",
+		);
+	}
+	activeCommandPrefixes = prefixes;
+	clearConfigValueCache();
+}
+
+export function getAllowedCommandPrefixes(): readonly string[] {
+	return activeCommandPrefixes;
+}
+
 // Cache for shell command results (persists for process lifetime)
 const commandResultCache = new Map<string, string | undefined>();
 const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;

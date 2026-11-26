@@ -85,6 +85,13 @@ export interface LoadSkillsResult {
 	diagnostics: ResourceDiagnostic[];
 }
 
+let loadedSkillsCache: Skill[] = [];
+
+/** GSD compat: last skills loaded via {@link loadSkills}. */
+export function getLoadedSkills(): Skill[] {
+	return [...loadedSkillsCache];
+}
+
 /**
  * Validate skill name per Agent Skills spec.
  * Returns array of validation error messages (empty if valid).
@@ -498,8 +505,11 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		}
 	}
 
+	const skills = Array.from(skillMap.values());
+	loadedSkillsCache = skills;
+
 	return {
-		skills: Array.from(skillMap.values()),
+		skills,
 		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
 	};
 }

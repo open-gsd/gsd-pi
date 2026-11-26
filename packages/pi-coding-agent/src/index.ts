@@ -364,3 +364,4 @@ export { formatDimensionNote, type ResizedImage, resizeImage } from "./utils/ima
 export { detectSupportedImageMimeTypeFromFile } from "./utils/mime.js";
 // Shell utilities
 export { getPowerShellConfig, getShellConfig } from "./utils/shell.js";
+export * from "./host-compat.js";

@@ -338,11 +338,12 @@ export async function dispatchDirectPhase(
     // The turn runs under the claim's worker heartbeat and lease renewal, so a
     // turn longer than the lease TTL cannot lose the claim to another
     // session's stale-takeover while it runs (the one-unit bound).
-    const send = () =>
-      pi.sendMessage(
+    const send = async () => {
+      await pi.sendMessage(
         { customType: "gsd-dispatch", content: dispatchContent, display: false },
         { triggerTurn: true },
       );
+    };
     if (claim.kind === "claimed") {
       await runInteractiveClaimTurn(claim, send);
     } else {

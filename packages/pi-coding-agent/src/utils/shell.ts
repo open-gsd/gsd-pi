@@ -212,6 +212,57 @@ export function getShellEnv(): NodeJS.ProcessEnv {
 	};
 }
 
+/** GSD compat: normalize Windows NUL redirects for bash compatibility. */
+export function sanitizeCommand(command: string): string {
+	if (process.platform !== "win32") return command;
+
+	const isDigit = (char: string | undefined): boolean => Boolean(char && char >= "0" && char <= "9");
+	const isBoundary = (char: string | undefined): boolean =>
+		char === undefined ||
+		char === " " ||
+		char === "\t" ||
+		char === ";" ||
+		char === "|" ||
+		char === "&" ||
+		char === ")";
+
+	let output = "";
+	for (let index = 0; index < command.length; ) {
+		let cursor = index;
+		while (isDigit(command[cursor])) {
+			cursor++;
+		}
+		if (command[cursor] !== ">") {
+			output += command[index]!;
+			index++;
+			continue;
+		}
+
+		cursor++;
+		if (command[cursor] === ">") {
+			cursor++;
+		}
+
+		const redirectToken = command.slice(index, cursor);
+		let valueStart = cursor;
+		while (command[valueStart] === " ") {
+			valueStart++;
+		}
+
+		const value = command.slice(valueStart, valueStart + 3);
+		if (value.toLowerCase() === "nul" && isBoundary(command[valueStart + 3])) {
+			output += `${redirectToken} /dev/null`;
+			index = valueStart + 3;
+			continue;
+		}
+
+		output += command[index]!;
+		index++;
+	}
+
+	return output;
+}
+
 /**
  * Sanitize binary output for display/storage.
  * Removes characters that crash string-width or cause display issues:
@@ -264,9 +315,22 @@ function getTaskkillPath(): string {
 }
 
 /**
- * Kill a process and all its children (cross-platform)
+ * Grace period (ms) between SIGTERM and SIGKILL.
+ * Canonical source for the graceful-kill timing ladder — imported by async_bash
+ * and GSD exec-sandbox kill paths.
  */
-export function killProcessTree(pid: number): void {
+export const SIGKILL_GRACE_MS = 5_000;
+/** Hard deadline (ms) after SIGKILL to force-resolve the job promise. */
+export const HARD_DEADLINE_MS = 3_000;
+
+/**
+ * Kill a process and all its children (cross-platform).
+ *
+ * Returns immediately; the SIGKILL escalation fires asynchronously after `graceMs`.
+ * On Windows: force-terminate with taskkill /F /T (grace ignored).
+ * On Unix: SIGTERM → grace → SIGKILL.
+ */
+export function killProcessTree(pid: number, opts?: { graceMs?: number }): void {
 	if (process.platform === "win32") {
 		try {
 			const child = spawn(getTaskkillPath(), ["/F", "/T", "/PID", String(pid)], {
@@ -279,30 +343,28 @@ export function killProcessTree(pid: number): void {
 		} catch {
 			// Ignore errors if taskkill fails.
 		}
-	} else {
-		if (process.platform === "darwin") {
-			// macOS signals group members individually after releasing the group lock. A killed
-			// child can wake its waiting shell before that shell is signalled, letting `a; b`
-			// start b during cancellation (#11252). Stop the group first to reduce this race;
-			// this is best-effort, not an atomic freeze. SIGKILL also kills stopped processes.
-			// Linux holds tasklist_lock across group signalling; child exit notification needs
-			// its write lock, so the shell is signalled before observing the killed child's exit.
-			try {
-				process.kill(-pid, "SIGSTOP");
-			} catch {
-				// A failed stop must not prevent the kill attempt or its single-process fallback.
-			}
+		return;
+	}
+
+	try {
+		process.kill(-pid, "SIGTERM");
+	} catch {
+		try {
+			process.kill(pid, "SIGTERM");
+		} catch {
+			return;
 		}
-		// Use SIGKILL on Unix/Linux/Mac
+	}
+	const t = setTimeout(() => {
 		try {
 			process.kill(-pid, "SIGKILL");
 		} catch {
-			// Fallback to killing just the child if process group kill fails
 			try {
 				process.kill(pid, "SIGKILL");
 			} catch {
 				// Process already dead
 			}
 		}
-	}
+	}, opts?.graceMs ?? SIGKILL_GRACE_MS);
+	if (typeof t === "object" && "unref" in t) t.unref();
 }

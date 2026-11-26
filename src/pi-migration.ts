@@ -35,7 +35,7 @@ const LLM_PROVIDER_IDS = [
  */
 export function migratePiCredentials(authStorage: AuthStorage): boolean {
   try {
-    const existing = authStorage.list()
+    const existing = authStorage.listProviders()
     const hasLlm = existing.some(id => LLM_PROVIDER_IDS.includes(id))
     if (hasLlm) return false
 
