@@ -52,6 +52,8 @@ export interface SessionHeader {
 export interface NewSessionOptions {
 	id?: string;
 	parentSession?: string;
+	/** Optional cwd override for the new session header (GSD worktree / newSession). */
+	cwd?: string;
 }
 
 export interface SessionEntryBase {
@@ -1147,6 +1149,9 @@ export class SessionManager {
 	newSession(options?: NewSessionOptions): string | undefined {
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
+		}
+		if (options?.cwd) {
+			this.cwd = resolvePath(options.cwd);
 		}
 		this._resetExternalUsage();
 		this.sessionId = options?.id ?? createSessionId();

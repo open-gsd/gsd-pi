@@ -113,7 +113,7 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 			// Built-in registry keys are lowercase. Match case-insensitively so that
 			// frontmatter like `tools: Read, Bash` resolves correctly.
 			const builtinByLower = new Map<string, ToolName>(
-				Object.keys(allTools).map((n) => [n.toLowerCase(), n as ToolName]),
+				allTools.map((n) => [n.toLowerCase(), n]),
 			);
 			const validTools: ToolName[] = [];
 			const extras: string[] = [];

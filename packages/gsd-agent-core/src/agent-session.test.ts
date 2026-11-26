@@ -323,6 +323,14 @@ describe("AgentSessionModelModule — repairPlaceholderModel (#2782)", () => {
             : undefined,
         getAvailable: () => (configuredModel ? [configuredModel] : []),
         hasConfiguredAuth: () => true,
+        getModelRuntime: () => ({
+          getModel: (provider: string, id: string) =>
+            configuredModel && configuredModel.provider === provider && configuredModel.id === id
+              ? configuredModel
+              : undefined,
+          hasConfiguredAuth: () => Boolean(configuredModel),
+          getAvailableSnapshot: () => (configuredModel ? [configuredModel] : []),
+        }),
       },
       sessionManager: {
         buildSessionContext: () => ({ model: undefined as { provider: string; modelId: string } | undefined }),

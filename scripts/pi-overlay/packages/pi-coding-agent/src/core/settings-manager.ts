@@ -992,6 +992,11 @@ export class SettingsManager {
 		this.compactionThresholdOverride = percent;
 	}
 
+	/** GSD: read the in-memory compaction threshold override, if any. */
+	getCompactionThresholdPercent(): number | undefined {
+		return this.compactionThresholdOverride;
+	}
+
 	/** GSD: current edit tool presentation mode. */
 	getEditMode(): "standard" | "hashline" {
 		return this.editMode;
