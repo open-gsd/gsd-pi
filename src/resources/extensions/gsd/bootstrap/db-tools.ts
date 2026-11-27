@@ -325,11 +325,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_decision_save when recording an architectural, pattern, library, or observability decision.",
 			"Decision IDs are auto-assigned (D001, D002, ...) — never guess or provide an ID.",
-			"All fields except revisable, when_context, made_by, supersedes, and impacts are required.",
 			"To reverse or replace an earlier decision, set supersedes to its ID. Only an active decision can be superseded.",
-			"Impacts are optional; each needs kind (revalidates/supersedes/blocks) and a target: milestone_id (optionally slice_id/task_id) or free-text scope.",
 			"The tool writes to the DB and regenerates .gsd/DECISIONS.md automatically.",
-			"Set made_by to 'human' when the user explicitly directed the decision, 'agent' when the LLM chose autonomously (default), or 'collaborative' when it was discussed and agreed together.",
 		],
 		parameters: Type.Object({
 			scope: Type.String({
@@ -510,7 +507,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_requirement_update to change status, validation, notes, or other fields on an existing requirement.",
 			"The id parameter is required — it must be an existing RXXX identifier.",
-			"All other fields are optional — only provided fields are updated.",
 			"The tool verifies the requirement exists before updating.",
 		],
 		parameters: Type.Object({
@@ -644,9 +640,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Record a new GSD requirement to the database (auto-assigns ID, regenerates REQUIREMENTS.md)",
 		promptGuidelines: [
 			"Use gsd_requirement_save when recording a new capability, quality attribute, constraint, or anti-feature requirement.",
-			"Use one of these classes: core-capability, primary-user-loop, launchability, continuity, failure-visibility, integration, quality-attribute, operability, admin/support, compliance/security, differentiator, constraint, anti-feature.",
 			"Requirement IDs are auto-assigned (R001, R002, ...) — never guess or provide an ID.",
-			"class, description, why, and source are required. All other fields are optional.",
 			"The tool writes to the DB and regenerates .gsd/REQUIREMENTS.md automatically.",
 		],
 		parameters: Type.Object({
@@ -748,11 +742,10 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Save a GSD artifact (summary/research/UI spec/AI spec/spec/context/assessment/UAT) to DB and disk",
 		promptGuidelines: [
-			"Use gsd_summary_save to persist structured artifacts (SUMMARY, RESEARCH, UI-SPEC, AI-SPEC, SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT).",
+			"Use gsd_summary_save for structured project artifacts instead of writing .gsd markdown files directly.",
 			"milestone_id is required for milestone/slice/task artifacts. Omit milestone_id only for root-level PROJECT/PROJECT-DRAFT/REQUIREMENTS/REQUIREMENTS-DRAFT.",
 			"The tool computes the relative path automatically: milestones/M001/M001-SUMMARY.md, milestones/M001/slices/S01/S01-SUMMARY.md, etc.",
 			"Root-level artifact paths are PROJECT.md, PROJECT-DRAFT.md, REQUIREMENTS.md, and REQUIREMENTS-DRAFT.md.",
-			"artifact_type must be one of: SUMMARY, RESEARCH, UI-SPEC, AI-SPEC, SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT.",
 			"UAT (despite the tool name) saves the slice's UAT acceptance document: pass milestone_id + slice_id and no task_id; it persists to the slice's UAT record, so corrections to a completed slice's UAT markdown survive projection flushes.",
 			"A slice-scoped SUMMARY (slice_id, no task_id) is a completion artifact: the slice must be terminal (done and closed) or the save is rejected — record mid-flight findings as CONTEXT, CONTEXT-DRAFT, or ASSESSMENT instead. Task-scoped SUMMARY keeps its staging path (#2994).",
 			"Use CONTEXT-DRAFT for incremental draft persistence; use CONTEXT for the final milestone context after depth verification.",
@@ -1079,7 +1072,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Keep parameters flat and provide the full milestone planning payload, including slices.",
 			"Milestone and slice titles are normalized automatically: forward slash (/) becomes '-', en/em dashes become ' - ' (#2588).",
 			"The tool validates input, writes milestone and slice planning data transactionally, renders ROADMAP.md from DB, and clears both state and parse caches after success.",
-			"Use the canonical name gsd_plan_milestone; gsd_milestone_plan is only an alias.",
 		],
 		parameters: Type.Object({
 			// ── Core identification + content (required) ──────────────────────
@@ -1250,7 +1242,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"When tasks is omitted or empty, the tool writes only slice planning metadata and preserves existing tasks.",
 			"When tasks is non-empty, the tool validates input, requires an existing parent slice, writes slice/task planning data, renders PLAN.md and task plan files from DB, and clears both state and parse caches after success.",
 			"Every task must declare requiredWorkflowTools; use [] for ordinary implementation tasks. Tools unavailable to execute-task are rejected before persistence.",
-			"Use the canonical name gsd_plan_slice; gsd_slice_plan is only an alias.",
 		],
 		parameters: Type.Object({
 			// ── Core identification + content (required) ──────────────────────
@@ -1422,7 +1413,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Keep parameters flat and provide the full task planning payload.",
 			"Declare requiredWorkflowTools explicitly; use [] for ordinary implementation tasks. Tools unavailable to execute-task are rejected before persistence.",
 			"The tool validates input, requires an existing parent slice, writes task planning data, renders the slice PLAN file from DB, and clears both state and parse caches after success.",
-			"Use the canonical name gsd_plan_task; gsd_task_plan is only an alias.",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
@@ -1503,9 +1493,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Record a GSD Task result and advance verification or recovery; a blocker receipt includes recoveryActionId for gsd_task_recovery_resume when a recovery action is recorded",
 		promptGuidelines: [
-			"Use gsd_task_complete (or gsd_complete_task) when a task is finished and needs to be recorded.",
+			"Use gsd_task_complete when a task is finished and needs to be recorded.",
 			"Include verification whenever possible. If verification is omitted, the executor derives it from verificationEvidence when possible.",
-			"verificationEvidence is an array of objects with command, exitCode, verdict, durationMs.",
 			"The tool validates required fields and returns an error message if verification cannot be derived.",
 			"Canonical success returns attemptId, resultId, nextStage, and summaryPath while completion awaits host verification; a blocker routes to recovery and returns recoveryActionId for gsd_task_recovery_resume when a recovery action is recorded.",
 			"Legacy success returns summaryPath and may report stale projection repair or a duplicate non-mutating retry; matching parameters alone do not make a replay.",
@@ -1705,7 +1694,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Complete a GSD Slice in SQLite, then refresh readable projections",
 		promptGuidelines: [
-			"Use gsd_slice_complete (or gsd_complete_slice) when every Task is terminal with current durable completion proof or a current authorized cancellation Waiver.",
+			"Use gsd_slice_complete when every Task is terminal with current durable completion proof or a current authorized cancellation Waiver.",
 			"Open Tasks, running Attempts, missing current passing evidence, and unauthorized cancellation block completion.",
 			"On a current success, returns summaryPath and uatPath; stale identifies projection repair, while duplicate and superseded classify an exact receipt replay.",
 			"Exact retries require the host to preserve the private invocation identity; matching parameters alone are not replay identity.",
@@ -2021,7 +2010,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet: "Validate a GSD milestone (DB write + VALIDATION.md render)",
 		promptGuidelines: [
 			"Use gsd_validate_milestone when all slices are done and the milestone needs validation before completion.",
-			"Parameters: milestoneId, verdict, remediationRound, successCriteriaChecklist, sliceDeliveryAudit, crossSliceIntegration, requirementCoverage, verificationClasses (optional), verificationEvidence (required for planned classes), verdictRationale, remediationPlan (optional).",
 			"If verification classes were planned, verificationClasses must be a complete canonical table with one row for every applicable planned class using the exact class names Contract, Integration, Operational, and UAT. Do not submit a partial table.",
 			"Planned verification text marked as none/not required/not applicable/N/A (including suffixed variants such as 'not required - backend-only') is treated as not applicable and does not require a class row.",
 			"If verdict is 'needs-remediation', also provide remediationPlan and use gsd_reassess_roadmap to add remediation slices to the roadmap.",
@@ -2202,10 +2190,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Replan a GSD slice with structural enforcement of completed tasks",
 		promptGuidelines: [
-			"Use gsd_replan_slice (canonical) or gsd_slice_replan (alias) when a blocker is discovered and the slice plan needs rewriting.",
+			"Use gsd_replan_slice when a blocker is discovered and the slice plan needs rewriting.",
 			"The tool structurally enforces that completed tasks cannot be updated or removed — violations return specific error payloads naming the blocked task ID.",
-			"Parameters: milestoneId, sliceId, blockerTaskId, blockerDescription, whatChanged, updatedTasks (array), removedTaskIds (array).",
-			"updatedTasks items: taskId, title, description, estimate, files, verify, inputs, expectedOutput, requiredWorkflowTools ([] for ordinary tasks).",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
@@ -2366,7 +2352,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_rework_brief_save when post-unit checks produce task rework findings.",
 			"Use severity 'blocking' for findings that must be resolved before gsd_task_complete succeeds.",
-			"Each finding needs a stable findingId, requiredFix, and verificationCommands.",
 		],
 		parameters: Type.Object({
 			briefId: Type.Optional(
@@ -2502,10 +2487,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Reassess a GSD roadmap with structural enforcement of completed slices",
 		promptGuidelines: [
-			"Use gsd_reassess_roadmap (canonical) or gsd_roadmap_reassess (alias) after a slice completes to reassess the roadmap.",
+			"Use gsd_reassess_roadmap after a slice completes to reassess the roadmap.",
 			"The tool structurally enforces that completed slices cannot be modified or removed. Use metadataCorrections only for audited acceptance/evidence language; it cannot change status, tasks, or dependencies.",
-			"Parameters: milestoneId, completedSliceId, verdict, assessment, sliceChanges (object with modified, added, removed arrays), and optional metadataCorrections.",
-			"sliceChanges.modified items: sliceId, title, risk (optional), depends (optional), demo (optional).",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
@@ -2627,7 +2610,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Use gsd_task_reopen when a completed task needs to be re-done (e.g. verification missed a regression, requirements changed).",
 			"Will fail if the parent slice or milestone is already closed — reopen those first.",
 			"Will fail if the task is not currently 'complete' — there is nothing to reopen.",
-			"Use the canonical name gsd_task_reopen; gsd_reopen_task is only an alias.",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
@@ -2803,7 +2785,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Will fail under a terminal parent Milestone; reopen the Milestone hierarchy when the entire delivery needs rework.",
 			"Will fail if the Slice is not terminal or any transitive downstream Slice has progressed — reopen downstream work first.",
 			"Exact invocation replays report duplicate; a historical replay may also report superseded. stale means projection cleanup or refresh needs repair.",
-			"Use the canonical name gsd_slice_reopen; gsd_reopen_slice is only an alias.",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
@@ -2863,7 +2844,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Pass keepCompleted=true to unlock the milestone for new work without resetting completed slices/tasks or deleting their SUMMARY projections.",
 			"Will fail if the Milestone is not currently terminal — there is nothing to reopen.",
 			"Exact invocation replays report duplicate; historical replays report superseded and cannot remove newer projections.",
-			"Use the canonical name gsd_milestone_reopen; gsd_reopen_milestone is only an alias.",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
@@ -3123,10 +3103,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Save quality gate evaluation result (verdict, rationale, findings)",
 		promptGuidelines: [
 			"Use gsd_save_gate_result after evaluating a quality gate question.",
-			"gateId must be one of: Q3, Q4, Q5, Q6, Q7, Q8, MV01, MV02, MV03, MV04.",
-			"verdict must be: pass (no concerns), flag (concerns found), or omitted (not applicable).",
-			"rationale should be a one-sentence justification for the verdict.",
-			"findings should contain detailed markdown analysis (or empty string if omitted).",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
@@ -3214,10 +3190,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet: "Record a post-unit hook gate verdict",
 		promptGuidelines: [
 			"Call gsd_hook_verdict_save once when the hook finishes.",
-			"hookName must be the name of the configured post_unit_hooks entry you ran.",
-			"unitId must be the trigger unit id the hook ran for.",
-			"verdict must be: pass, advisory, needs-rework, needs-remediation, or needs-attention.",
-			"rationale should state what the hook checked and why it reached the verdict.",
 		],
 		parameters: Type.Object({
 			hookName: Type.String({ description: "Configured hook name (post_unit_hooks entry)" }),
@@ -3347,7 +3319,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Use gsd_requirement_list to read what requirements are recorded — do not parse REQUIREMENTS.md.",
 			'Filter by class (e.g. "core-capability"), status (e.g. "active"), or milestoneId to narrow results.',
 			"The returned requirements array matches the DB canonical state, not the projection on disk.",
-			"Default limit is 200; hard cap is 500. Increase limit only if you need a full corpus scan.",
 		],
 		parameters: Type.Object({
 			class: Type.Optional(
@@ -3646,9 +3617,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_decision_list to read what decisions are recorded — do not parse DECISIONS.md.",
 			'Filter by scope (exact match, e.g. "architecture") or milestoneId to narrow results.',
-			"Set includeSuperseded: true to see the full decision chain including overridden decisions.",
 			"Decisions are sourced from the memories table (ADR-013 Stage 3), not the legacy decisions table.",
-			"Default limit is 200; hard cap is 500.",
 		],
 		parameters: Type.Object({
 			scope: Type.Optional(
@@ -3803,7 +3772,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_project_snapshot for a one-shot view of project state — do not assemble it from markdown projections.",
 			"The snapshot is DB-authoritative; projections may be stale after migrations or failed regens.",
-			"Optionally pass projectDir to target a specific project root; defaults to the session working directory.",
 		],
 		parameters: Type.Object({
 			projectDir: Type.Optional(
@@ -3946,7 +3914,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			'Use gsd_decision_get to read a specific decision by ID (e.g. "D007").',
 			'Returns { error: "not_found" } when the ID is absent, tombstoned, or (by default) superseded.',
-			"Set includeSuperseded: true to retrieve a superseded decision by ID.",
 			'Returns { error: "db_unavailable" } when the GSD database cannot be opened.',
 			"Decision data is sourced from the memories table (ADR-013 Stage 3), not the legacy decisions table.",
 			"Never fabricate decision content — if not_found, call gsd_decision_list to verify what IDs exist.",
