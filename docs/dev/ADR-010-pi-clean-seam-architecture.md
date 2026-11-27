@@ -288,4 +288,4 @@ GSD business logic still belongs in `@gsd/agent-core` and `@gsd/agent-modes`. Th
 
 **Execution plan:** [pi-overlay-execution-plan.md](./pi-overlay-execution-plan.md)
 
-Publishing `@gsd/pi-*` as an npm alias of `@earendil-works/pi-*` does not work. The published packages do not export `./*`, and the seam deletes modules the published package still contains. The engine stays a workspace package generated from pinned tag `v0.75.5` plus `scripts/pi-overlay/`. See [the engine host plan](../plans/2026-11-25-1707-refactor-pi-engine-host-plan.md).
+Publishing `@gsd/pi-*` as an npm alias of `@earendil-works/pi-*` does not work. The published packages do not export `./*`, and the seam deletes modules the published package still contains. The engine stays a workspace package generated from pinned tag `v1.6.1` plus `scripts/pi-overlay/`. See [the engine host plan](../plans/2026-11-25-1707-refactor-pi-engine-host-plan.md) and [pi-v161-remaining.md](./pi-v161-remaining.md).

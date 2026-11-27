@@ -9,7 +9,7 @@ GSD vendors the [earendil-works/pi](https://github.com/earendil-works/pi) monore
 | Item | Value |
 |---|---|
 | Upstream repo | `earendil-works/pi` |
-| Pinned ref | **v0.75.5** |
+| Pinned ref | **v1.6.1** |
 | npm scope (upstream) | `@earendil-works/pi-*` |
 | GSD packages | `@gsd/pi-*`, `@gsd/agent-core`, `@gsd/agent-modes` |
 | Build | `npm run build:pi` |
@@ -17,7 +17,7 @@ GSD vendors the [earendil-works/pi](https://github.com/earendil-works/pi) monore
 | Patch inventory CI | `npm run verify:pi-patches` |
 | Claude tool schemas | `npm run test:pi-claude-schemas` |
 
-Phase 2 used **GSD shim restoration** (incremental compat on upstream v0.75.5 APIs) rather than a full upstream modes sync. `@gsd/agent-modes` was migrated from the old GSD fork and reconciled via shims in pi-tui, pi-coding-agent, pi-ai, and agent-core.
+The checked-in engine is the **v1.6.1** pin plus `scripts/pi-overlay/`. Phase 2 used **GSD shim restoration** (incremental compat on the earlier v0.75.5 APIs) rather than a full upstream modes sync. `@gsd/agent-modes` was migrated from the old GSD fork and reconciled via shims in pi-tui, pi-coding-agent, pi-ai, and agent-core. What is still open after the pin is [pi-v161-remaining.md](./pi-v161-remaining.md).
 
 ## Pin metadata
 
@@ -56,7 +56,7 @@ Smoke tests exercise CLI `--help` and `--version` only; they do not require API 
 
 ## Upgrade workflow
 
-`pinnedRef` stays **v0.75.5** until a follow-on plan. Do not move it in order to inspect upstream.
+`pinnedRef` is **v1.6.1**. Do not move it in order to inspect a newer tag.
 
 Safe inspection does not write `packages/pi-*`:
 
@@ -64,9 +64,9 @@ Safe inspection does not write `packages/pi-*`:
 node scripts/sync-pi-engine.cjs --dry-run
 ```
 
-A real copy is opt-in and must use an absolute `--dest` outside this repo. `--ref <tag>` selects that tag; omit it and the command uses `pinnedRef`. The command uses `.cache/pi-upstream` when that checkout is the selected ref. Otherwise it clones that tag into a temporary directory. It then copies the four packages and reapplies `scripts/pi-overlay/`. For any tag other than the pin, the conflict paths and `session-cwd.ts` stay on the upstream versions. `scripts/pi-161-ports.cjs` reapplies the behaviors listed in `docs/dev/pi-v161-remaining.md`. It deletes the seam paths listed in `scripts/pi-seam.json` from the external coding-agent tree and rewrites that tree's seam imports. It does not run `scripts/apply-seam.cjs` against this repo, and it does not write `packages/pi-*`.
+A real copy is opt-in and must use an absolute `--dest` outside this repo. `--ref <tag>` selects that tag; omit it and the command uses `pinnedRef`. The command uses `.cache/pi-upstream` when that checkout is the selected ref. Otherwise it clones that tag into a temporary directory. It then copies every package in `packageMap` and reapplies `scripts/pi-overlay/`. For any tag other than the pin, the conflict paths and `session-cwd.ts` stay on the upstream versions. `scripts/pi-161-ports.cjs` reapplies the behaviors listed in `docs/dev/pi-v161-remaining.md`. It deletes the seam paths listed in `scripts/pi-seam.json` from the external coding-agent tree and rewrites that tree's seam imports. It does not run `scripts/apply-seam.cjs` against this repo, and it does not write `packages/pi-*`.
 
-`scripts/vendor-pi.cjs`, `scripts/vendor-pi-deps.cjs`, and `scripts/vendor-pi-coding-agent-core.cjs` are not the upgrade path. Do not run them when the cache was fetched at a tag other than v0.75.5. A mismatched cache exits non-zero before copying.
+`scripts/vendor-pi.cjs`, `scripts/vendor-pi-deps.cjs`, and `scripts/vendor-pi-coding-agent-core.cjs` are not the upgrade path. Do not run them when the cache was fetched at a tag other than the pinned ref. A mismatched cache exits non-zero before copying.
 
 File-by-file disposition for the overlay is [pi-overlay-triage.md](./pi-overlay-triage.md). The plan is [../plans/2026-11-25-1707-refactor-pi-engine-host-plan.md](../plans/2026-11-25-1707-refactor-pi-engine-host-plan.md).
 
