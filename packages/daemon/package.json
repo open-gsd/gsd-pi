@@ -33,7 +33,7 @@
     "@opengsd/rpc-client": "workspace:*",
     "discord.js": "^14.25.1",
     "yaml": "^2.8.0",
-    "zod": "^3.24.0"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^24.12.0",
