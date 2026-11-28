@@ -114,17 +114,24 @@ function recordCurrentUnitHarnessAbort(
   );
 }
 
-function clearCurrentUnitToolErrorHarnessAbort(toolName: string): void {
+function clearCurrentUnitRecoveredHarnessAbort(toolName: string): void {
   if (toolName !== "gsd_exec" && toolName !== "gsd_uat_exec") return;
   const dash = getAutoRuntimeSnapshot();
   if (!dash.active || !dash.basePath || !dash.currentUnit) return;
-  clearUnitHarnessAbort(
-    dash.basePath,
-    dash.currentUnit.type,
-    dash.currentUnit.id,
-    dash.currentUnit.startedAt,
-    "tool-error",
-  );
+  // #2017 cleared a recorded tool-error once a later exec succeeds. The same
+  // staleness applies to a turn-abort recorded before a provider-model
+  // fallback switch (#3199): once the recovered turn is executing tools
+  // again, the truncated-turn marker must not block the gate saves that
+  // follow. tool-loop-guard is deliberately not cleared here.
+  for (const kind of ["tool-error", "turn-abort"] as const) {
+    clearUnitHarnessAbort(
+      dash.basePath,
+      dash.currentUnit.type,
+      dash.currentUnit.id,
+      dash.currentUnit.startedAt,
+      kind,
+    );
+  }
 }
 
 type WelcomeProjectState = { milestone?: string; phase?: string; slice?: string; nextAction?: string };
@@ -2158,7 +2165,7 @@ export function registerHooks(
       recordRetryableHarnessToolError(toolName, resultPayload, errorText);
     } else if (isAutoActive()) {
       clearToolInvocationError(event.toolName);
-      clearCurrentUnitToolErrorHarnessAbort(toolName);
+      clearCurrentUnitRecoveredHarnessAbort(toolName);
     }
     // Interactive Closeout adapter (ADR-032): auto-mode owns closeout for its
     // own units; interactive completions get the durable git subset (commit +
@@ -2376,7 +2383,7 @@ export function registerHooks(
       recordRetryableHarnessToolError(toolName, event.result, errorText);
     } else if (isAutoActive()) {
       clearToolInvocationError(event.toolName);
-      clearCurrentUnitToolErrorHarnessAbort(toolName);
+      clearCurrentUnitRecoveredHarnessAbort(toolName);
     }
     // Safety harness: record tool execution results for evidence cross-referencing
     if (isAutoActive()) {
