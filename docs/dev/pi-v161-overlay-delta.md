@@ -3,7 +3,7 @@
 Disposition of every file under `scripts/pi-overlay/` against earendil-works/pi **v1.6.1** (`ef4a1cf`).
 Path mapping matches `scripts/pi-upstream.json`: `packages/pi-agent-core` → `packages/agent`, `packages/pi-ai` → `packages/ai`, `packages/pi-tui` → `packages/tui`, `packages/pi-coding-agent` → `packages/coding-agent`.
 
-v0.75.5 (`89ba72c`, the current pin) is used only to tell a GSD-only insertion from an edit in a region v1.6.1 also rewrote. `@gsd/pi-*` versus `@earendil-works/pi-*`, and `.js` versus `.ts` import suffixes, are treated as mechanical.
+v0.75.5 (`89ba72c`, the pin before the v1.6.1 move) is used only to tell a GSD-only insertion from an edit in a region v1.6.1 also rewrote. `@gsd/pi-*` versus `@earendil-works/pi-*`, and `.js` versus `.ts` import suffixes, are treated as mechanical.
 
 | path | disposition | evidence |
 | --- | --- | --- |

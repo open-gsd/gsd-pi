@@ -1,4 +1,4 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@gsd/pi-ai";
+import { type AssistantMessage, type AssistantMessageEvent, createInitialSystemMessage, EventStream } from "@gsd/pi-ai";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/index.js";
 
@@ -55,6 +55,19 @@ function noopStreamFn() {
 	return stream;
 }
 
+/** v1.6.1 derives `state.systemPrompt` from the transcript. There is no setter. */
+function setSystemPrompt(agent: Agent, systemPrompt: string): void {
+	const systemMessage = createInitialSystemMessage(systemPrompt, []);
+	const messages = agent.state.messages.slice();
+	if (messages[0]?.role === "system") {
+		if (systemMessage) messages[0] = systemMessage;
+		else messages.shift();
+	} else if (systemMessage) {
+		messages.unshift(systemMessage);
+	}
+	agent.state.messages = messages;
+}
+
 describe("Agent", () => {
 	it("should create an agent instance with default state", () => {
 		const agent = new Agent({ streamFn: noopStreamFn });
@@ -98,7 +111,7 @@ describe("Agent", () => {
 		expect(agent.state.thinkingLevel).toBe("low");
 	});
 
-	it.skip("should subscribe to events", () => { // v1.6.1 AgentState.systemPrompt is read-only
+	it("should subscribe to events", () => {
 		const agent = new Agent({ streamFn: noopStreamFn });
 
 		let eventCount = 0;
@@ -109,15 +122,20 @@ describe("Agent", () => {
 		// No initial event on subscribe
 		expect(eventCount).toBe(0);
 
-		// State mutators don't emit events
-		agent.state.systemPrompt = "Test prompt";
+		// State mutators don't emit events. systemPrompt follows the transcript.
+		agent.state.thinkingLevel = "low";
+		expect(eventCount).toBe(0);
+		expect(agent.state.thinkingLevel).toBe("low");
+
+		setSystemPrompt(agent, "Test prompt");
 		expect(eventCount).toBe(0);
 		expect(agent.state.systemPrompt).toBe("Test prompt");
 
 		// Unsubscribe should work
 		unsubscribe();
-		agent.state.systemPrompt = "Another prompt";
+		setSystemPrompt(agent, "Another prompt");
 		expect(eventCount).toBe(0); // Should not increase
+		expect(agent.state.systemPrompt).toBe("Another prompt");
 	});
 
 	it("emits full lifecycle events for thrown run failures", async () => {
@@ -381,41 +399,46 @@ describe("Agent", () => {
 		expect(agentEnds[0]?.abortOrigin).toBeUndefined();
 	});
 
-	it.skip("should update state with mutators", () => { // v1.6.1 AgentState.systemPrompt is read-only
+	it("should update state with mutators", () => {
 		const agent = new Agent({ streamFn: noopStreamFn });
 
-		// Test setSystemPrompt
-		agent.state.systemPrompt = "Custom prompt";
+		setSystemPrompt(agent, "Custom prompt");
 		expect(agent.state.systemPrompt).toBe("Custom prompt");
 
-		// Test setModel
-		const newModel = getModel("google", "gemini-2.5-flash");
-		agent.state.model = newModel;
+		const newModel = {
+			id: "gemini-2.5-flash",
+			name: "gemini-2.5-flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		} as const;
+		agent.state.model = newModel as never;
 		expect(agent.state.model).toBe(newModel);
 
-		// Test setThinkingLevel
 		agent.state.thinkingLevel = "high";
 		expect(agent.state.thinkingLevel).toBe("high");
 
-		// Test setTools
 		const tools = [{ name: "test", description: "test tool" } as any];
 		agent.state.tools = tools;
 		expect(agent.state.tools).toEqual(tools);
 		expect(agent.state.tools).not.toBe(tools); // Should be a copy
 
-		// Test replaceMessages
 		const messages = [{ role: "user" as const, content: "Hello", timestamp: Date.now() }];
 		agent.state.messages = messages;
 		expect(agent.state.messages).toEqual(messages);
 		expect(agent.state.messages).not.toBe(messages); // Should be a copy
+		expect(agent.state.systemPrompt).toBe("");
 
-		// Test appendMessage
 		const newMessage = { role: "assistant" as const, content: [{ type: "text" as const, text: "Hi" }] };
 		agent.state.messages.push(newMessage as any);
 		expect(agent.state.messages).toHaveLength(2);
 		expect(agent.state.messages[1]).toBe(newMessage);
 
-		// Test clearMessages
 		agent.state.messages = [];
 		expect(agent.state.messages).toEqual([]);
 	});
